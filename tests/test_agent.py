@@ -288,3 +288,46 @@ async def test_the_history_holds_plain_blocks_with_only_what_the_api_sent(settin
     await run(make(settings, llm), session, [])
     assert session.messages[1]["content"] == [{"type": "thinking", "thinking": "", "signature": "abc=="}, {"type": "text", "text": "Listo."}]
     json.dumps(session.messages)  # nothing in the history needs the SDK to be saved
+
+
+THOUGHT = {"type": "thinking", "thinking": "", "signature": "abc=="}
+
+
+async def test_thinking_written_under_other_instructions_or_tools_is_dropped_before_the_next_request(settings):
+    box = FakeBox()
+    box.schemas = [{"name": "resumen_atleta"}]
+    session = Session()
+    llm = ScriptedLLM(reply([text("Uno.")]), reply([text("Dos.")]), reply([text("Tres.")]), reply([text("Cuatro.")]))
+    agent = Agent(settings, llm, box, "PROMPT")
+    await run(agent, session, [], "uno")
+    session.messages[1]["content"].insert(0, dict(THOUGHT))
+    session.messages.append({"role": "user", "content": "solo pienso"})
+    session.messages.append({"role": "assistant", "content": [dict(THOUGHT)]})
+
+    # Same instructions and tools: the history goes back exactly as it was written.
+    await run(agent, session, [], "dos")
+    assert session.messages[1]["content"][0] == THOUGHT and session.messages[3]["content"] == [THOUGHT]
+
+    # A deploy added a tool.
+    box.schemas = [{"name": "resumen_atleta"}, {"name": "entrenos_atleta"}]
+    await run(agent, session, [], "tres")
+    assert session.messages[1]["content"] == [{"type": "text", "text": "Uno."}]
+    assert session.messages[3]["content"] == [{"type": "text", "text": "(sin texto)"}]
+    assert all(b.get("type") != "thinking" for m in llm.calls[-1]["messages"] if isinstance(m["content"], list) for b in m["content"])
+
+    # The instructions changed.
+    session.messages[-1]["content"].insert(0, dict(THOUGHT))
+    await run(Agent(settings, llm, box, "OTRO PROMPT"), session, [], "cuatro")
+    assert THOUGHT not in session.messages[-3]["content"]
+
+
+async def test_a_session_saved_before_the_fingerprint_existed_loses_its_thinking_once():
+    from duma.sessions import _dump, _load
+
+    session = Session(messages=[{"role": "user", "content": "hola"}], prefix="abc")
+    assert _load(_dump(session)).prefix == "abc"
+    import json
+
+    old = json.loads(_dump(session))
+    del old["prefix"]
+    assert _load(json.dumps(old)).prefix == ""

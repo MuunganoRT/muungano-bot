@@ -8,6 +8,10 @@ Three rules that keep the history valid and the model's reasoning intact:
   - the assistant's `content` is appended with every block as received,
     thinking blocks included (as plain dicts, so a session can be saved), and
     earlier messages are never edited (the history only grows);
+  - a thinking block is only valid after the exact instructions and tools it
+    was written under. When those change under a saved session (a deploy, a new
+    preference, the date in the prompt), its thinking blocks are removed once,
+    before the next request, instead of sending blocks the API will refuse;
   - when a turn fails half way, every message it added is removed, so the next
     request never starts from a `tool_use` without its `tool_result`;
   - a session that grows past its limit is replaced whole, never trimmed.
@@ -16,6 +20,8 @@ Three rules that keep the history valid and the model's reasoning intact:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -81,6 +87,8 @@ class Session:
     notes: str = ""
     # Who each ATLETA_NN is. Kept across a compaction, so the notes' codes still resolve.
     names: Pseudonyms = field(default_factory=Pseudonyms)
+    # Fingerprint of the instructions and tools the thinking blocks in `messages` were written under.
+    prefix: str = ""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def reset(self) -> None:
@@ -185,6 +193,22 @@ class Agent:
             self._fixed = {system: (with_system - bare, with_tools - with_system)}
         return self._fixed[system]
 
+    def _align(self, session: Session, system: list[dict[str, Any]]) -> None:
+        """Drop the session's thinking blocks if they were written under other instructions or tools."""
+        prefix = hashlib.sha256(
+            json.dumps([system, self._tools.schemas], sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        if session.prefix == prefix:
+            return
+        for message in session.messages:
+            content = message.get("content")
+            if message.get("role") != "assistant" or not isinstance(content, list):
+                continue
+            kept = [b for b in content if b.get("type") not in ("thinking", "redacted_thinking")]
+            # An assistant turn cannot be empty, and removing the message would break the user/assistant order.
+            message["content"] = kept or [{"type": "text", "text": "(sin texto)"}]
+        session.prefix = prefix
+
     async def compact(self, session: Session) -> bool:
         """Replace the conversation with the model's own notes of it. False when the notes could not be written.
 
@@ -193,11 +217,13 @@ class Agent:
         """
         if not session.messages:
             return False
+        system = self._system_blocks()
+        self._align(session, system)
         try:
             response = await self._llm.create(
                 model=self._s.model,
                 max_tokens=self._s.max_tokens_per_message,
-                system=self._system_blocks(),
+                system=system,
                 cache_control={"type": "ephemeral"},
                 tools=self._tools.schemas,
                 messages=[*session.messages, {"role": "user", "content": SUMMARY_REQUEST}],
@@ -231,6 +257,9 @@ class Agent:
 
         Returns the text for the chat, or None if there is none.
         """
+        # Read once per turn: the date in it must not change between two requests of the same tool loop.
+        system = self._system_blocks()
+        self._align(session, system)
         mark = len(session.messages)
         session.messages.append({"role": "user", "content": self._opening(session, content)})
         try:
@@ -240,7 +269,7 @@ class Agent:
                     max_tokens=self._s.max_tokens_per_message,
                     # Two cache points: the instructions and tools, which every topic and admin share, and
                     # (the top-level one) the end of this conversation, which moves forward with each request.
-                    system=self._system_blocks(),
+                    system=system,
                     cache_control={"type": "ephemeral"},
                     tools=self._tools.schemas,
                     messages=session.messages,

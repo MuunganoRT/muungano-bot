@@ -88,6 +88,7 @@ descartaron: exportan a imagen con un navegador sin cabeza.
 - **El CI no tiene `.env`, base de datos ni `/app/data`.** Antes de subir al API, correr la suite como en GitHub:
   `ARCHIVE_DIR=/app/data/muungano_raw SAMPLES_DIR=/app/data/muungano_samples JWT_SECRET= PG_HOST= .venv/bin/python -m pytest -q`
   y `ruff check .` (largo de línea 100). En local el `.env` tapa esos errores.
+- **Los bloques de razonamiento guardados dejan de valer si cambian el prompt o las herramientas.** Anthropic contesta 400 (`Invalid signature in thinking block … bound to a different conversation`) y Duma decía «No pude con eso ahorita». Pasaba tras cada deploy, al guardar una preferencia y al cambiar el día (el prompt lleva la fecha). `Agent._align` (`duma/agent.py`) guarda una huella del prompt y las herramientas en la sesión y, si cambió, quita esos bloques una vez antes de pedir.
 - **Solo un Duma por token.** Con el de producción prendido, no arrancar otro en local con el mismo bot: se pelean
   (`409 Conflict`). Para desarrollar en local hace falta otro bot de BotFather y otro grupo, o apagar el de producción.
 - **En el `.env` del servidor no va `BOT_DATABASE_URL`**: Duma toma `CLOUDRON_POSTGRESQL_URL`.

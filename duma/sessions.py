@@ -28,6 +28,7 @@ def _dump(session: Session) -> str:
             "usage": dataclasses.asdict(session.usage),
             "notes": session.notes,
             "names": session.names.to_list(),
+            "prefix": session.prefix,
         },
         ensure_ascii=False,
     )
@@ -42,6 +43,8 @@ def _load(raw: str) -> Session:
         usage=Usage(**data["usage"]),
         notes=data["notes"],
         names=Pseudonyms.from_list(data["names"]),
+        # Absent in a session saved before the field existed: empty never matches, so its thinking is dropped.
+        prefix=data.get("prefix", ""),
     )
 
 
