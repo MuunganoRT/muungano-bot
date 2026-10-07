@@ -206,17 +206,27 @@ SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "grafica",
         "description": (
-            "Muestra en el chat una gráfica por semana (lunes a domingo): entrenos hechos contra prescritos, "
-            "kilómetros o score. De UN atleta (con `nombre`) o del conjunto de personas que cumplen `filtros`; no las "
-            "dos cosas. Sin `desde` y `hasta` cubre las últimas 8 semanas; el máximo son 92 días y, por filtros, 60 "
-            "personas. Tú no ves la imagen. De un atleta recibes solo el acuse; de un conjunto, además, los totales "
-            "por semana, que puedes comentar. Si el nombre es ambiguo, el administrador recibe los candidatos y te "
+            "Muestra en el chat una gráfica. Tres tipos. `semanal` (por defecto): por semana, de lunes a domingo, "
+            "entrenos hechos contra prescritos, kilómetros o score, de UN atleta (con `nombre`) o del conjunto de "
+            "personas que cumplen `filtros`; no las dos cosas. `ranking`: las personas del conjunto ordenadas por la "
+            "métrica en el periodo, con nombre; si son más de 10, las 5 primeras y las 5 últimas. Para «quién va "
+            "mejor», «quién va más flojo», «top 5». `dispersion`: por semana, el score más bajo, la mediana y el más "
+            "alto entre las personas del conjunto; dice si el grupo va parejo. Solo con `metrica` score. `ranking` y "
+            "`dispersion` son de un conjunto: van con `filtros`, nunca con `nombre`. Sin `desde` y `hasta` cubre las "
+            "últimas 8 semanas; el máximo son 92 días y, por filtros, 60 personas. Tú no ves la imagen. De un atleta "
+            "y del ranking recibes solo el acuse, sin nombres ni cifras de nadie; de un conjunto por semana, además, "
+            "los totales, que puedes comentar. Si el nombre es ambiguo, el administrador recibe los candidatos y te "
             "contesta cuál."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "metrica": {"type": "string", "enum": ["entrenos", "km", "score"]},
+                "tipo": {
+                    "type": "string",
+                    "enum": ["semanal", "ranking", "dispersion"],
+                    "description": "Por defecto `semanal`.",
+                },
                 "nombre": {"type": "string", "description": "Nombre y/o apellido, para la gráfica de un atleta."},
                 "grupo": {"type": "string", "description": "Con `nombre`: grupo del atleta, para distinguir homónimos."},
                 "filtros": FILTERS_SCHEMA,
@@ -309,6 +319,7 @@ ANALYZE_CONCURRENCY = 5
 # Same zone as the API's "today".
 TZ = ZoneInfo("America/Monterrey")
 CHART_DEFAULT_WEEKS = 8
+CHART_KINDS = ("semanal", "ranking", "dispersion")
 
 
 def _integer(args: dict[str, Any], key: str, minimum: int, maximum: int) -> int:
@@ -408,6 +419,12 @@ def _row(code: str, person: dict[str, Any], summary: Optional[dict[str, Any]]) -
 def _week_figures(week: dict[str, Any]) -> str:
     score = "sin score" if week["score_avg"] is None else f"score {week['score_avg']}"
     return f"{week['week_start']}: {week['done']}/{week['prescribed']} entrenos, {week['distance_km']} km, {score}"
+
+
+def _week_spread(week: dict[str, Any]) -> str:
+    if not week.get("scored"):
+        return f"{week['week_start']}: nadie"
+    return f"{week['week_start']}: {week['scored']} personas, {week['score_min']} / {week['score_median']} / {week['score_max']}"
 
 
 def _understood(found: dict[str, Any]) -> str:
@@ -618,9 +635,16 @@ class Toolbox:
         metric = args.get("metrica")
         if metric not in charts.METRICS:
             raise ValueError("`metrica` must be one of: " + ", ".join(charts.METRICS))
+        kind = args.get("tipo") or "semanal"
+        if kind not in CHART_KINDS:
+            raise ValueError("`tipo` must be one of: " + ", ".join(CHART_KINDS))
         one = args.get("nombre") not in (None, "")
         if one and args.get("filtros"):
             raise ValueError("send `nombre` or `filtros`, not both")
+        if one and kind != "semanal":
+            raise ValueError(f"`{kind}` compares the people of a set: send `filtros`, not `nombre`")
+        if kind == "dispersion" and metric != "score":
+            raise ValueError("`dispersion` is only drawn for `metrica` score")
 
         start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
         today = datetime.now(TZ).date()
@@ -637,6 +661,8 @@ class Toolbox:
             body["athlete_id"] = athlete_id
         else:
             body.update(filters=_filters(args), member_status=_member_status(args))
+        if kind == "ranking":
+            body["per_athlete"] = True
 
         found = await self._api.post("/assistant/athletes/series", telegram_user_id=telegram_user_id, json=body)
         weeks = found["weeks"]
@@ -646,6 +672,38 @@ class Toolbox:
             people = found["athletes"]
             groups = (found.get("matched") or {}).get("groups") or []
             who = (" / ".join(groups) + " · " if groups else "") + ("1 persona" if people == 1 else f"{people} personas")
+        subtitle = f"{who} · {_period(start, end)}"
+
+        if kind == "ranking":
+            people = found.get("people") or []
+            ranked = len(charts.ranked(people, metric))
+            if not ranked:
+                return ToolResult(
+                    f"No hay nada que graficar de {who} en ese periodo.",
+                    "Nadie tuvo entrenos prescritos en ese periodo; ya se lo dije al administrador." + _understood(found),
+                )
+            png = await asyncio.to_thread(charts.ranking_png, people, metric, subtitle)
+            shown = "todas" if ranked <= 2 * charts.RANKING_ENDS else f"las {charts.RANKING_ENDS} primeras y las {charts.RANKING_ENDS} últimas"
+            # Names and each person's figure are in the picture only.
+            acknowledgement = (
+                f"Ranking de {metric} enviado al chat, del {start} al {end}: {ranked} personas con entrenos prescritos, "
+                f"se muestran {shown}." + _understood(found)
+            )
+            return ToolResult("", acknowledgement, file=OutFile(f"ranking_{metric}.png", png, photo=True))
+
+        if kind == "dispersion":
+            if not charts.has_spread(weeks):
+                return ToolResult(
+                    f"No hay nada que graficar de {who} en ese periodo.",
+                    "Nadie tuvo entrenos prescritos en ese periodo; ya se lo dije al administrador." + _understood(found),
+                )
+            png = await asyncio.to_thread(charts.spread_png, weeks, subtitle)
+            acknowledgement = (
+                f"Gráfica de dispersión del score enviada al chat, del {start} al {end}. Por semana (personas con "
+                "entrenos: mínimo / mediana / máximo): " + "; ".join(_week_spread(w) for w in weeks) + "." + _understood(found)
+            )
+            return ToolResult("", acknowledgement, file=OutFile("dispersion_score.png", png, photo=True))
+
         if not charts.has_data(weeks, metric):
             return ToolResult(
                 f"No hay nada que graficar de {who} en ese periodo.",
@@ -653,7 +711,7 @@ class Toolbox:
             )
 
         # Drawing is CPU work: off the event loop, so the bot keeps answering while it renders.
-        png = await asyncio.to_thread(charts.weekly_png, weeks, metric, f"{who} · {_period(start, end)}")
+        png = await asyncio.to_thread(charts.weekly_png, weeks, metric, subtitle)
         acknowledgement = f"Gráfica de {metric} enviada al chat: {len(weeks)} semanas, del {start} al {end}."
         if not one:
             # Totals of a set identify nobody, like `cifras`. One athlete's weeks stay out of the model.

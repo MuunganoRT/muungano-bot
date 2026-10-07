@@ -34,15 +34,24 @@ voz y una regla con botones.
 **Gráficas subidas el 2026-10-06:** la ruta `POST /assistant/athletes/series` está en `dev` (`6aee592`) y en `main`
 del API (PR de Alex); el bot, en `main`. El deploy instala `matplotlib` solo.
 
+**Ranking y dispersión subidos el 2026-10-06:** el API en `dev` (`7230573`) y en `main` (PR de Alex); el bot, en
+`main`. La ruta de series acepta `per_athlete` y cada semana trae `scored`, `score_min`, `score_median` y `score_max`.
+
 **Lo siguiente, en orden:**
-1. Probar `grafica` en el grupo: no se ha visto en Telegram; se probó contra el API local, con la imagen revisada.
-2. Fase 3, newsletter (sección 5): job en el API, tabla de noticias del team, banco de frases y envío con
+1. Probar las tres gráficas en el grupo (se probaron contra el API local, con las imágenes revisadas; ninguna se
+   ha visto en Telegram).
+2. El menú de comandos al escribir `/` le aparece a Alex en el iPhone y no en la Mac. Comprobado en producción con
+   `getMyCommands`: los seis comandos están en el alcance `chat` del grupo y en ningún otro. Es el cliente de Mac;
+   si reiniciarlo no basta, registrarlos también en el alcance `default`.
+3. Fase 3, newsletter (sección 5): job en el API, tabla de noticias del team, banco de frases y envío con
    confirmación. Las confirmaciones con botones ya existen (`duma/confirmations.py`).
 
 **Gráficas, cómo quedaron:** `matplotlib`, solo 2D. La herramienta `grafica` dibuja por semana (lunes a domingo)
 entrenos hechos contra prescritos, km o score, de un atleta o de un conjunto por filtros; sin fechas cubre las
 últimas 8 semanas. Topes del API: 92 días y 60 personas. La imagen se arma en memoria y sale como foto
-(`sendPhoto`). De un atleta el modelo recibe solo el acuse; de un conjunto, además, los totales por semana. El
+(`sendPhoto`). De un atleta el modelo recibe solo el acuse; de un conjunto, además, los totales por semana. `tipo: ranking` ordena a las
+personas del conjunto por la métrica (más de 10: las 5 primeras y las 5 últimas; los nombres van solo en la imagen)
+y `tipo: dispersion` dibuja por semana el score mínimo, la mediana y el máximo entre atletas. El
 estilo (colores de la consola, tipografía, tamaño) son constantes al inicio de `duma/charts.py`. Plotly y Altair se
 descartaron: exportan a imagen con un navegador sin cabeza.
 

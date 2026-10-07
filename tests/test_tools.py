@@ -41,6 +41,8 @@ class FakeApi:
             who = {"athlete": {"id": json["athlete_id"], "name": "Ana Peña"}} if "athlete_id" in json else {
                 "matched": self.matched, "notes": self.notes
             }
+            if json.get("per_athlete"):
+                who["people"] = self.people
             return {"success": True, "athletes": 1 if "athlete_id" in json else 12, "weeks": self.weeks, **who}
         if json.get("count_only"):
             return {"success": True, "total": len(self.athletes), "matched": self.matched, "notes": self.notes}
@@ -59,8 +61,15 @@ class FakeApi:
     total = None
     figures = {"athletes": 23}
     weeks = [
-        {"week_start": "2026-09-07", "prescribed": 5, "done": 4, "distance_km": 38.2, "score_avg": 71.0},
-        {"week_start": "2026-09-14", "prescribed": 0, "done": 0, "distance_km": 0.0, "score_avg": None},
+        {"week_start": "2026-09-07", "prescribed": 5, "done": 4, "distance_km": 38.2, "score_avg": 71.0,
+         "scored": 3, "score_min": 20.0, "score_median": 71.0, "score_max": 96.0},
+        {"week_start": "2026-09-14", "prescribed": 0, "done": 0, "distance_km": 0.0, "score_avg": None,
+         "scored": 0, "score_min": None, "score_median": None, "score_max": None},
+    ]
+    people = [
+        {"id": 10, "name": "Ana Peña", "prescribed": 5, "done": 4, "distance_km": 38.2, "score_avg": 71.0},
+        {"id": 11, "name": "Ana Ruiz", "prescribed": 4, "done": 0, "distance_km": 0.0, "score_avg": 0.0},
+        {"id": 12, "name": "Beto Salinas", "prescribed": 0, "done": 0, "distance_km": 0.0, "score_avg": None},
     ]
 
 
@@ -479,6 +488,47 @@ async def test_a_chart_refuses_a_bad_request_before_calling_the_api():
         {"metrica": "ritmo", "nombre": "ana"},
         {"metrica": "km", "nombre": "ana", "filtros": [{"tipo": "grupo", "nombre": "maraton"}]},
         {"metrica": "km", "nombre": "ana", "desde": "2026-09-30", "hasta": "2026-09-01"},
+    ):
+        assert (await box.run("grafica", args, 1)).is_error, args
+    assert api.calls == []
+
+
+GROUP = [{"tipo": "grupo", "nombre": "maraton"}]
+SEPTEMBER = {"desde": "2026-09-07", "hasta": "2026-09-20"}
+
+
+async def test_a_ranking_asks_for_the_breakdown_and_keeps_names_and_figures_in_the_picture():
+    api = FakeApi([])
+    r = await Toolbox(api).run("grafica", {"metrica": "score", "tipo": "ranking", "filtros": GROUP, **SEPTEMBER}, 1)
+    assert api.calls[-1][1]["per_athlete"] is True
+    assert r.file.name == "ranking_score.png" and r.file.photo and r.file.content.startswith(PNG)
+    # Beto had nothing prescribed: he is not ranked last with a zero he did not earn.
+    assert "2 personas con entrenos prescritos, se muestran todas" in r.to_model
+    assert "Ana" not in r.to_model and "71" not in r.to_model
+
+
+async def test_a_spread_chart_tells_the_model_the_weekly_range_and_asks_for_no_breakdown():
+    api = FakeApi([])
+    r = await Toolbox(api).run("grafica", {"metrica": "score", "tipo": "dispersion", "filtros": GROUP, **SEPTEMBER}, 1)
+    assert "per_athlete" not in api.calls[-1][1]
+    assert r.file.name == "dispersion_score.png" and r.file.content.startswith(PNG)
+    assert "2026-09-07: 3 personas, 20.0 / 71.0 / 96.0" in r.to_model and "2026-09-14: nadie" in r.to_model
+
+
+async def test_a_ranking_of_people_with_nothing_prescribed_draws_nothing():
+    api = FakeApi([])
+    api.people = [FakeApi.people[2]]
+    r = await Toolbox(api).run("grafica", {"metrica": "km", "tipo": "ranking", "filtros": GROUP}, 1)
+    assert r.file is None and r.direct_text.startswith("No hay nada que graficar")
+
+
+async def test_ranking_and_spread_refuse_what_they_cannot_draw_before_calling_the_api():
+    api = FakeApi([ANA_P])
+    box = Toolbox(api)
+    for args in (
+        {"metrica": "score", "tipo": "ranking", "nombre": "ana"},
+        {"metrica": "km", "tipo": "dispersion", "filtros": GROUP},
+        {"metrica": "score", "tipo": "pastel", "filtros": GROUP},
     ):
         assert (await box.run("grafica", args, 1)).is_error, args
     assert api.calls == []
