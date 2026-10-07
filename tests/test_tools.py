@@ -1,0 +1,405 @@
+from duma.api_client import ApiError
+from duma.tools import Toolbox
+
+ANA_P = {"id": 10, "name": "Ana Peña", "group": "Maratón", "active": True}
+ANA_R = {"id": 11, "name": "Ana Ruiz", "group": "Fondo 10K", "active": True}
+
+SUMMARY = {
+    "success": True,
+    "athlete": ANA_P,
+    "period": {"from": "2026-09-01", "to": "2026-09-30"},
+    "cycle": None,
+    "workouts": {"prescribed": 3, "done": 2, "missed": 1},
+    "score_avg": 64.3,
+    "distance_km": 40.0,
+    "avg_pace": "5:25",
+    "avg_heart_rate": 161,
+    "longest": None,
+}
+
+
+class FakeApi:
+    def __init__(self, athletes, summary=SUMMARY, fail=None):
+        self.athletes, self.summary, self.fail = athletes, summary, fail
+        self.calls = []
+
+    async def get(self, path, *, telegram_user_id, params=None):
+        self.calls.append((path, params, telegram_user_id))
+        if self.fail:
+            raise self.fail
+        if path == "/assistant/athletes":
+            return {"success": True, "athletes": self.athletes, "total": len(self.athletes)}
+        return self.summary
+
+    async def post(self, path, *, telegram_user_id, json):
+        self.calls.append((path, json, telegram_user_id))
+        if self.fail:
+            raise self.fail
+        if path.endswith("/aggregate"):
+            return {"success": True, **self.figures, "matched": self.matched, "notes": self.notes}
+        if json.get("count_only"):
+            return {"success": True, "total": len(self.athletes), "matched": self.matched, "notes": self.notes}
+        return {
+            "success": True,
+            "total": self.total if self.total is not None else len(self.athletes),
+            "returned": len(self.athletes),
+            "truncated": self.total is not None and self.total > len(self.athletes),
+            "athletes": self.athletes,
+            "matched": self.matched,
+            "notes": self.notes,
+        }
+
+    matched = {"events": [], "groups": []}
+    notes: list = []
+    total = None
+    figures = {"athletes": 23}
+
+
+async def test_search_shows_the_list_and_tells_the_model_nothing_personal():
+    box = Toolbox(FakeApi([ANA_P, ANA_R]))
+    r = await box.run("buscar_atleta", {"texto": "ana"}, 956)
+    assert box._api.calls[-1][1]["member_status"] == "all"  # active and paused unless asked otherwise
+    assert "Ana Peña (Maratón)" in r.direct_text and "Ana Ruiz" in r.direct_text
+    assert "Ana" not in r.to_model and "Peña" not in r.to_model
+    assert not r.is_error
+
+
+async def test_summary_of_a_unique_match():
+    api = FakeApi([ANA_P])
+    r = await Toolbox(api).run("resumen_atleta", {"nombre": "ana pena", "desde": "2026-09-01", "hasta": "2026-09-30", "ciclo": False}, 956)
+    assert r.direct_text.startswith("Ana Peña\n1 sep – 30 sep 2026\nEntrenos: 2/3 (67%)")
+    assert r.to_model == "Resumen enviado al chat: 2 de 3 entrenos."
+    path, params, user = api.calls[-1]
+    assert path == "/assistant/athletes/10/summary" and params == {"from": "2026-09-01", "to": "2026-09-30"} and user == 956
+
+
+async def test_the_cycle_flag_is_forwarded():
+    api = FakeApi([ANA_P])
+    await Toolbox(api).run("resumen_atleta", {"nombre": "ana pena", "ciclo": True}, 1)
+    assert api.calls[-1][1] == {"use_cycle": "true"}
+
+
+async def test_an_ambiguous_name_asks_the_admin_and_not_the_model():
+    api = FakeApi([ANA_P, ANA_R])
+    r = await Toolbox(api).run("resumen_atleta", {"nombre": "ana"}, 1)
+    assert "¿Cuál?" in r.direct_text
+    assert "Peña" not in r.to_model and "Ruiz" not in r.to_model
+    assert len(api.calls) == 1  # no summary was fetched
+
+
+async def test_the_group_resolves_a_namesake_without_accents_or_case():
+    api = FakeApi([ANA_P, ANA_R])
+    r = await Toolbox(api).run("resumen_atleta", {"nombre": "ana", "grupo": "MARATON"}, 1)
+    assert r.direct_text.startswith("Ana Peña") and api.calls[-1][0] == "/assistant/athletes/10/summary"
+
+
+async def test_nobody_found():
+    r = await Toolbox(FakeApi([])).run("resumen_atleta", {"nombre": "zzz zzz"}, 1)
+    assert r.direct_text == "No encontré a nadie con ese nombre." and not r.is_error
+
+
+async def test_bad_input_is_an_error_for_the_model_and_nothing_for_the_chat():
+    box = Toolbox(FakeApi([ANA_P]))
+    for name, args in (
+        ("resumen_atleta", {"nombre": "a"}),
+        ("resumen_atleta", {"nombre": "ana", "desde": "ayer"}),
+        ("resumen_atleta", {}),
+        ("buscar_atleta", {"texto": 5}),
+        ("borrar_todo", {}),
+    ):
+        r = await box.run(name, args, 1)
+        assert r.is_error and r.direct_text is None, (name, args)
+
+
+async def test_an_api_error_reaches_the_model_as_an_error_result():
+    r = await Toolbox(FakeApi([], fail=ApiError(400, "60 athletes match; narrow the filters"))).run("buscar_atleta", {"texto": "ana"}, 1)
+    assert r.is_error and "narrow the filters" in r.to_model and r.direct_text is None
+
+
+async def test_an_api_failure_is_logged_with_its_real_cause(caplog):
+    with caplog.at_level("WARNING", logger="duma.tools"):
+        await Toolbox(FakeApi([], fail=ApiError(401, "The API rejected my token"))).run("buscar_atleta", {"texto": "ana"}, 1)
+    assert "tool buscar_atleta failed: API status 401: The API rejected my token" in caplog.text
+
+
+async def test_the_admin_can_narrow_the_search_to_active_or_inactive_only():
+    api = FakeApi([ANA_P])
+    box = Toolbox(api)
+    for estado, expected in (("activos", "active"), ("inactivos", "inactive"), ("todos", "all")):
+        await box.run("buscar_atleta", {"texto": "ana", "estado": estado}, 1)
+        assert api.calls[-1][1]["member_status"] == expected
+    bad = await box.run("buscar_atleta", {"texto": "ana", "estado": "borrados"}, 1)
+    assert bad.is_error and "estado" in bad.to_model
+
+
+async def test_a_summary_looks_for_the_person_among_active_and_paused():
+    api = FakeApi([ANA_P])
+    await Toolbox(api).run("resumen_atleta", {"nombre": "ana pena"}, 1)
+    assert api.calls[0][1]["member_status"] == "all"
+
+
+async def test_a_filtered_query_translates_the_filters_and_shows_the_list():
+    api = FakeApi([{**ANA_P, "events": [{"event": "Maratón de Chicago", "date": "2025-10-12", "time_result": 13510}]}])
+    api.matched = {"events": ["Maratón de Chicago (2025-10-12)"], "groups": ["Maratón"]}
+    r = await Toolbox(api).run(
+        "buscar_atletas",
+        {
+            "filtros": [
+                {"tipo": "evento", "nombre": "chicago", "condicion": "con_tiempo", "anio": 2025},
+                {"tipo": "pago", "desde": "2026-10-01", "hasta": "2026-10-06"},
+                {"tipo": "grupo", "nombre": "maraton"},
+                {"tipo": "entrenos", "desde": "2026-09-01", "hasta": "2026-09-30", "minimo": 10},
+            ],
+            "estado": "activos",
+        },
+        956,
+    )
+    path, body, user = api.calls[-1]
+    assert path == "/assistant/athletes/query" and user == 956
+    assert body == {
+        "filters": [
+            {"type": "event", "name": "chicago", "status": "with_time", "year": 2025},
+            {"type": "paid", "from": "2026-10-01", "to": "2026-10-06"},
+            {"type": "group", "name": "maraton"},
+            {"type": "workouts", "from": "2026-09-01", "to": "2026-09-30", "min_done": 10},
+        ],
+        "member_status": "active",
+        "limit": 500,
+    }
+    assert "Ana Peña (Maratón) · Maratón de Chicago (12 oct 2025) 3:45:10" in r.direct_text
+    assert "Ana" not in r.to_model and "Peña" not in r.to_model
+    assert "Maratón de Chicago (2025-10-12)" in r.to_model and "1 resultado(s)" in r.to_model
+
+
+async def test_a_query_without_filters_is_the_whole_roster_active_and_paused():
+    api = FakeApi([ANA_P, ANA_R])
+    await Toolbox(api).run("buscar_atletas", {}, 1)
+    assert api.calls[-1][1] == {"filters": [], "member_status": "all", "limit": 500}
+
+
+async def test_count_only_shows_nothing_and_gives_the_model_the_number():
+    api = FakeApi([ANA_P, ANA_R])
+    r = await Toolbox(api).run("buscar_atletas", {"filtros": [{"tipo": "grupo", "nombre": "fondo"}], "solo_contar": True}, 1)
+    assert api.calls[-1][1]["count_only"] is True and "limit" not in api.calls[-1][1]
+    assert r.direct_text is None and r.to_model.startswith("2 persona(s)")
+
+
+async def test_the_model_hears_what_did_not_match_and_what_was_left_out():
+    api = FakeApi([ANA_P])
+    api.total, api.notes = 800, ["No event matches 'bostn' with that status"]
+    r = await Toolbox(api).run("buscar_atletas", {"filtros": [{"tipo": "evento", "nombre": "bostn"}]}, 1)
+    assert "solo trae 1" in r.to_model and "No event matches 'bostn'" in r.to_model
+    assert r.direct_text == "800 personas. El archivo trae las primeras 1; acota los filtros para ver al resto."
+    assert r.file is not None
+
+
+async def test_a_long_list_goes_as_a_csv_file_and_a_short_one_as_text():
+    people = [{"id": i, "name": f"Persona {i:02d}", "group": "Maratón", "active": True} for i in range(51)]
+    long = await Toolbox(FakeApi(people)).run("buscar_atletas", {}, 1)
+    assert long.direct_text == "51 personas. Va la lista completa en el archivo."
+    assert long.file.name == "atletas.csv"
+    rows = long.file.content.decode("utf-8-sig").splitlines()
+    assert rows[0] == "Nombre,Rol,Grupo,Estado" and len(rows) == 52 and rows[1] == "Persona 00,,Maratón,activo"
+    assert "Persona" not in long.to_model and "CSV" in long.to_model
+
+    short = await Toolbox(FakeApi(people[:50])).run("buscar_atletas", {}, 1)
+    assert short.file is None and short.direct_text.startswith("50 personas:")
+
+
+async def test_a_malformed_filter_never_reaches_the_api():
+    api = FakeApi([ANA_P])
+    box = Toolbox(api)
+    for filtros in (
+        [{"tipo": "sql", "nombre": "x"}],
+        [{"tipo": "evento"}],
+        [{"tipo": "evento", "nombre": "chicago", "condicion": "ganaron"}],
+        [{"tipo": "evento", "nombre": "chicago", "anio": "2025"}],
+        [{"tipo": "pago", "desde": "2026-10-01"}],
+        [{"tipo": "pago", "desde": "2026-10-06", "hasta": "2026-10-01"}],
+        [{"tipo": "entrenos", "desde": "2026-09-01", "hasta": "2026-09-30"}],
+        [{"tipo": "entrenos", "desde": "2026-09-01", "hasta": "2026-09-30", "minimo": True}],
+        ["chicago"],
+        "chicago",
+        [{"tipo": "grupo", "nombre": "ab"}] * 9,
+    ):
+        r = await box.run("buscar_atletas", {"filtros": filtros}, 1)
+        assert r.is_error and r.direct_text is None, filtros
+    assert api.calls == []
+
+
+async def test_figures_go_to_the_model_as_numbers_and_nothing_goes_to_the_chat():
+    api = FakeApi([])
+    api.matched = {"events": [], "groups": ["Maratón"]}
+    api.figures = {
+        "athletes": 23,
+        "period": {"from": "2026-09-01", "to": "2026-09-30"},
+        "payments": {"count": 12, "total": 14400.0, "without_amount": 2},
+        "workouts": {"prescribed": 300, "done": 250, "missed": 50, "completion_pct": 83},
+        "distance_km": 1234.5,
+        "score_avg": 78.2,
+    }
+    r = await Toolbox(api).run(
+        "cifras",
+        {
+            "metricas": ["personas", "pagos", "entrenos", "km", "score", "km"],
+            "filtros": [{"tipo": "grupo", "nombre": "maraton"}],
+            "desde": "2026-09-01",
+            "hasta": "2026-09-30",
+        },
+        956,
+    )
+    path, body, user = api.calls[-1]
+    assert path == "/assistant/athletes/aggregate" and user == 956
+    assert body == {
+        "filters": [{"type": "group", "name": "maraton"}],
+        "member_status": "all",
+        "metrics": ["athletes", "payments", "workouts", "distance_km", "score_avg"],
+        "period": {"from": "2026-09-01", "to": "2026-09-30"},
+    }
+    assert r.direct_text is None and r.file is None and not r.is_error
+    assert r.to_model == (
+        "Personas: 23. Periodo: 2026-09-01 a 2026-09-30. "
+        "Pagos aprobados: 12, suman $14,400.00 MXN (2 sin monto capturado, no suman). "
+        "Entrenos: 250 hechos de 300 prescritos (83%). Distancia: 1234.5 km. Score promedio: 78.2%. "
+        "Grupos: Maratón."
+    )
+
+
+async def test_a_head_count_needs_no_period_and_every_other_figure_does():
+    api = FakeApi([])
+    box = Toolbox(api)
+    r = await box.run("cifras", {"metricas": ["personas"], "estado": "inactivos"}, 1)
+    assert api.calls[-1][1] == {"filters": [], "member_status": "inactive", "metrics": ["athletes"]}
+    assert r.to_model == "Personas: 23."
+
+    for args in (
+        {"metricas": ["pagos"]},
+        {"metricas": ["pagos"], "desde": "2026-10-06", "hasta": "2026-10-01"},
+        {"metricas": []},
+        {"metricas": ["sueldos"]},
+        {"metricas": "personas"},
+        {},
+    ):
+        bad = await box.run("cifras", args, 1)
+        assert bad.is_error and bad.direct_text is None, args
+    assert len(api.calls) == 1
+
+
+async def test_a_period_without_prescribed_workouts_has_no_score_and_says_so():
+    api = FakeApi([])
+    api.figures = {"athletes": 3, "period": {"from": "2026-09-01", "to": "2026-09-30"}, "score_avg": None}
+    r = await Toolbox(api).run("cifras", {"metricas": ["score"], "desde": "2026-09-01", "hasta": "2026-09-30"}, 1)
+    assert "Score promedio: sin entrenos prescritos." in r.to_model
+
+
+async def with_preferences(tmp_path):
+    from duma.confirmations import Confirmations
+    from duma.database import SqliteDatabase
+    from duma.preferences import Preferences
+
+    store = await Confirmations.open(SqliteDatabase(tmp_path / "bot.sqlite"), 60)
+    prefs = Preferences(tmp_path / "preferencias.md", "America/Monterrey")
+    return Toolbox(FakeApi([]), store, prefs), store, prefs
+
+
+async def test_a_preference_is_proposed_with_buttons_and_not_saved(tmp_path):
+    box, store, prefs = await with_preferences(tmp_path)
+    r = await box.run("guardar_preferencia", {"regla": "Los reportes de grupo siempre en tabla"}, 956)
+    assert r.direct_text == "Regla permanente que pide el admin 956:\n«Los reportes de grupo siempre en tabla»"
+    assert [label for label, _ in r.buttons] == ["Guardar", "Cancelar"] and "NO está guardada" in r.to_model
+    assert prefs.rules() == []  # nothing is written until the click
+
+    status, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
+    assert status == "ok" and pending.kind == "preference_add" and pending.summary == r.direct_text
+    assert pending.payload == {"rule": "Los reportes de grupo siempre en tabla", "replace": []}
+
+
+async def test_a_bad_or_surplus_preference_is_an_error_and_proposes_nothing(tmp_path):
+    from duma.preferences import MAX_RULES
+
+    box, _, prefs = await with_preferences(tmp_path)
+    for args in ({"regla": "ok"}, {"regla": 5}, {}):
+        r = await box.run("guardar_preferencia", args, 1)
+        assert r.is_error and r.buttons is None and r.direct_text is None, args
+    for i in range(MAX_RULES):
+        prefs.add(1, f"regla número {i}")
+    full = await box.run("guardar_preferencia", {"regla": "una más de la cuenta"}, 1)
+    assert full.is_error and "tope" in full.to_model
+
+
+async def test_without_a_place_to_keep_them_the_tool_is_not_offered():
+    box = Toolbox(FakeApi([]))
+    assert "guardar_preferencia" not in [s["name"] for s in box.schemas]
+    assert (await box.run("guardar_preferencia", {"regla": "siempre en tabla"}, 1)).is_error
+
+
+async def test_a_rule_that_resolves_a_clash_shows_what_it_replaces(tmp_path):
+    box, store, prefs = await with_preferences(tmp_path)
+    prefs.add(1, "Las listas siempre en tabla")
+    prefs.add(1, "Primero el score")
+    r = await box.run("guardar_preferencia", {"regla": "Las listas en tabla, salvo si son de menos de 5 personas", "reemplaza": [1, 1]}, 956)
+    assert r.direct_text == (
+        "Regla permanente que pide el admin 956:\n«Las listas en tabla, salvo si son de menos de 5 personas»\n\n"
+        "Reemplaza a:\n«Las listas siempre en tabla»"
+    )
+    assert "con cuál regla chocaba" in r.to_model
+    _, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
+    assert pending.payload["replace"] == [prefs.lines()[0]] and prefs.rules() == ["Las listas siempre en tabla", "Primero el score"]
+
+    for bad in ([3], [0], ["1"], [True], "1"):
+        assert (await box.run("guardar_preferencia", {"regla": "otra regla más", "reemplaza": bad}, 1)).is_error, bad
+
+
+async def test_the_model_is_told_to_check_the_saved_rules_before_proposing(tmp_path):
+    box, _, _ = await with_preferences(tmp_path)
+    description = next(s for s in box.schemas if s["name"] == "guardar_preferencia")["description"]
+    assert "contradice" in description and "reemplaza" in description and "cómo interpretas" in description
+
+
+async def test_analysis_rows_reach_the_model_with_codes_and_never_a_name():
+    from duma.pseudonyms import Pseudonyms
+
+    ana = {**ANA_P, "role": "runner", "events": [{"event": "42k Chicago", "date": "2025-10-12", "time_result": 12960}], "last_payment": {"date": "2026-10-03", "amount": 1200.0}}
+    luis = {"id": 12, "name": "Luis Coach", "role": "coach", "group": None, "active": False}
+    api, names = FakeApi([ana, luis]), Pseudonyms()
+    r = await Toolbox(api).run("consultar", {"filtros": [{"tipo": "evento", "nombre": "chicago"}]}, 956, names)
+    assert r.direct_text is None and r.file is None and not r.is_error
+    assert r.to_model.splitlines() == [
+        "2 persona(s).",
+        "ATLETA_01 | runner | grupo Maratón | activo | evento 42k Chicago (2025-10-12) tiempo 3:36:00 | último pago 2026-10-03 $1,200.00",
+        "ATLETA_02 | coach | grupo ninguno | inactivo",
+    ]
+    assert api.calls[-1][1]["limit"] == 60 and len(api.calls) == 1
+    assert names.restore("ATLETA_02") == "Luis Coach"
+
+
+async def test_analysis_with_a_period_adds_each_persons_workouts():
+    from duma.pseudonyms import Pseudonyms
+
+    api = FakeApi([ANA_P, ANA_R])
+    r = await Toolbox(api).run("consultar", {"desde": "2026-09-01", "hasta": "2026-09-30"}, 1, Pseudonyms())
+    rows = r.to_model.splitlines()
+    assert rows[0] == "2 persona(s). Periodo de entrenos: 2026-09-01 a 2026-09-30."
+    assert rows[1].endswith("entrenos 2/3 | score 64.3% | km 40.0 | ritmo 5:25 min/km | FC 161 lpm")
+    summaries = [c for c in api.calls if c[0].endswith("/summary")]
+    assert {c[0] for c in summaries} == {"/assistant/athletes/10/summary", "/assistant/athletes/11/summary"}
+    assert all(c[1] == {"from": "2026-09-01", "to": "2026-09-30"} for c in summaries) and api.calls[0][1]["limit"] == 25
+
+
+async def test_too_many_people_to_analyse_is_an_error_and_not_a_partial_list():
+    api = FakeApi([ANA_P])
+    api.total = 80
+    r = await Toolbox(api).run("consultar", {}, 1)
+    assert r.is_error and "80 people match" in r.to_model and "ATLETA" not in r.to_model
+    for bad in ({"desde": "2026-09-01"}, {"desde": "2026-09-30", "hasta": "2026-09-01"}):
+        assert (await Toolbox(api).run("consultar", bad, 1)).is_error
+
+
+async def test_a_summary_can_be_asked_by_code_without_searching_by_name():
+    from duma.pseudonyms import Pseudonyms
+
+    names = Pseudonyms()
+    names.code(10, "Ana Peña")
+    api = FakeApi([])
+    r = await Toolbox(api).run("resumen_atleta", {"nombre": "ATLETA_01"}, 1, names)
+    assert [c[0] for c in api.calls] == ["/assistant/athletes/10/summary"] and r.direct_text.startswith("Ana Peña")

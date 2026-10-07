@@ -1,0 +1,9 @@
+# Secrets and per-machine state: never versioned.
+.env
+state/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+*.egg-info/

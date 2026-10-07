@@ -1,0 +1,181 @@
+"""What Duma writes to the chat when a tool has its own answer.
+
+Plain templates: the figures come from the API and no model rewrites them, so
+the numbers that reach the admin are exactly the ones the API returned.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+from datetime import date
+from typing import Any, Optional
+
+MONTHS = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
+
+
+def _day(iso: str) -> str:
+    d = date.fromisoformat(iso)
+    return f"{d.day} {MONTHS[d.month - 1]}"
+
+
+def _day_year(iso: str) -> str:
+    return f"{_day(iso)} {date.fromisoformat(iso).year}"
+
+
+def _num(value: float) -> str:
+    return f"{value:.0f}" if abs(value - round(value)) < 0.05 else f"{value:.1f}"
+
+
+def _period(start: str, end: str) -> str:
+    if date.fromisoformat(start).year == date.fromisoformat(end).year:
+        return f"{_day(start)} – {_day_year(end)}"
+    return f"{_day_year(start)} – {_day_year(end)}"
+
+
+def render_summary(data: dict[str, Any]) -> str:
+    athlete, workouts, period = data["athlete"], data["workouts"], data["period"]
+    cycle: Optional[dict[str, Any]] = data.get("cycle")
+
+    title = athlete["name"] + ("" if athlete.get("active", True) else " (inactivo)")
+    if cycle and cycle.get("current_week"):
+        title += f" · {cycle['event']}, semana {cycle['current_week']} de {cycle['weeks_total']}"
+    elif cycle:
+        title += f" · {cycle['event']} ({_day_year(cycle['event_date'])})"
+
+    lines = [title, _period(period["from"], period["to"])]
+
+    prescribed, done = workouts["prescribed"], workouts["done"]
+    if not prescribed:
+        lines.append("Sin entrenos prescritos en ese periodo.")
+        return "\n".join(lines)
+
+    entry = f"Entrenos: {done}/{prescribed} ({round(100 * done / prescribed)}%)"
+    if data.get("score_avg") is not None:
+        entry += f" · score {_num(data['score_avg'])}%"
+    lines.append(entry)
+
+    figures = []
+    if data.get("distance_km"):
+        figures.append(f"{_num(data['distance_km'])} km")
+    if data.get("avg_pace"):
+        figures.append(f"ritmo promedio {data['avg_pace']} min/km")
+    if data.get("avg_heart_rate"):
+        figures.append(f"FC promedio {_num(data['avg_heart_rate'])} lpm")
+    if figures:
+        lines.append(" · ".join(figures))
+
+    longest = data.get("longest")
+    if longest:
+        parts = [f"{_num(longest['distance_km'])} km"]
+        if longest.get("pace"):
+            parts.append(f"{longest['pace']} min/km")
+        if longest.get("heart_rate"):
+            parts.append(f"{_num(longest['heart_rate'])} lpm")
+        parts.append(f"score {_num(longest['score'])}%")
+        lines.append(f"Más larga ({_day(longest['date'])}): " + " · ".join(parts))
+
+    return "\n".join(lines)
+
+
+def render_candidates(athletes: list[dict[str, Any]], total: int, question: bool) -> str:
+    """The members found, without ids: the admin picks by name or group. Coaches and admins say so."""
+    if not athletes:
+        return "No encontré a nadie con ese nombre."
+    lines = []
+    if question:
+        lines.append(f"Encontré {total} personas con ese nombre. ¿Cuál? Dime el nombre completo o el grupo.")
+    else:
+        lines.append(f"{total} persona(s):" if total != 1 else "1 persona:")
+    for a in athletes:
+        lines.append(f"- {_person(a)}")
+    if total > len(athletes):
+        lines.append(f"…y {total - len(athletes)} más; afina la búsqueda.")
+    return "\n".join(lines)
+
+
+def _person(a: dict[str, Any]) -> str:
+    extra = []
+    if a.get("role") in ("coach", "admin"):
+        extra.append(a["role"].capitalize())
+    if (a.get("group") or "").strip():
+        extra.append(a["group"].strip())
+    if not a.get("active", True):
+        extra.append("inactivo")
+    return a["name"] + (f" ({', '.join(extra)})" if extra else "")
+
+
+def _race_time(value: Any) -> str:
+    """A result as h:mm:ss. The API stores it in seconds; anything else is shown as it came."""
+    if value in (None, ""):
+        return ""
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
+def _money(amount: float) -> str:
+    return f"${amount:,.0f} MXN" if abs(amount - round(amount)) < 0.005 else f"${amount:,.2f} MXN"
+
+
+def render_matches(found: dict[str, Any]) -> str:
+    """The members a filtered query matched, each with the columns its filters were about."""
+    athletes, total = found["athletes"], found["total"]
+    if not total:
+        return "Nadie cumple esos filtros."
+    lines = ["1 persona:" if total == 1 else f"{total} personas:"]
+    for a in athletes:
+        parts = [_person(a)]
+        for e in a.get("events", []):
+            entry = f"{e['event']} ({_day_year(e['date'])})"
+            if e.get("time_result"):
+                entry += f" {_race_time(e['time_result'])}"
+            parts.append(entry)
+        payment = a.get("last_payment")
+        if payment:
+            amount = f"{_money(payment['amount'])} " if payment.get("amount") is not None else ""
+            parts.append(f"pagó {amount}el {_day_year(payment['date'])}")
+        lines.append("- " + " · ".join(parts))
+    if total > len(athletes):
+        lines.append(f"…y {total - len(athletes)} más; acota los filtros.")
+    return "\n".join(lines)
+
+
+def _cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    # A spreadsheet runs a cell that starts like a formula; names come from what members typed.
+    return "'" + text if text[:1] in ("=", "+", "-", "@") else text
+
+
+def matches_csv(found: dict[str, Any]) -> bytes:
+    """The same list as `render_matches`, one member per row, for a spreadsheet."""
+    athletes = found["athletes"]
+    with_events = any(a.get("events") for a in athletes)
+    with_payment = any(a.get("last_payment") for a in athletes)
+
+    header = ["Nombre", "Rol", "Grupo", "Estado"]
+    if with_events:
+        header += ["Evento", "Fecha del evento", "Tiempo"]
+    if with_payment:
+        header += ["Último pago", "Monto"]
+
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(header)
+    for a in athletes:
+        row = [a["name"], a.get("role") or "", (a.get("group") or "").strip(), "activo" if a.get("active", True) else "inactivo"]
+        if with_events:
+            events = a.get("events") or []
+            row += [
+                "; ".join(e["event"] for e in events),
+                "; ".join(e["date"] for e in events),
+                "; ".join(_race_time(e.get("time_result")) for e in events),
+            ]
+        if with_payment:
+            payment = a.get("last_payment") or {}
+            row += [payment.get("date") or "", "" if payment.get("amount") is None else payment["amount"]]
+        writer.writerow([_cell(v) for v in row])
+    # The BOM is what makes Excel read the accents as UTF-8.
+    return out.getvalue().encode("utf-8-sig")

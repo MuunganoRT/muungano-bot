@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Duma, el asistente de Muungano</title>
+<style>
+  @page { size: Letter; margin: 15mm 18mm 13mm; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif; color: #1f2430; font-size: 10.5pt; line-height: 1.45; margin: 0; }
+  h1 { font-size: 21pt; margin: 0 0 2pt; color: #14213d; letter-spacing: -0.3pt; }
+  .sub { color: #5b6272; margin: 0 0 14pt; font-size: 11pt; }
+  h2 { font-size: 13pt; margin: 12pt 0 5pt; color: #14213d; border-bottom: 1.5pt solid #e4e7ee; padding-bottom: 3pt; }
+  p { margin: 0 0 6pt; }
+  .cols { display: flex; gap: 14pt; align-items: flex-start; }
+  .col { flex: 1; border-radius: 6pt; padding: 10pt 12pt; }
+  .si { background: #eef7f0; border: 1pt solid #c5e3cc; }
+  .no { background: #fbeeee; border: 1pt solid #efc9c9; }
+  .col h3 { margin: 0 0 6pt; font-size: 12pt; }
+  .si h3 { color: #1f6b35; } .no h3 { color: #9b2c2c; }
+  ul { margin: 0; padding-left: 14pt; }
+  li { margin: 0 0 5pt; }
+  li b { color: #14213d; }
+  .tag { font-size: 8pt; background: #fff3cd; color: #7a5a00; border-radius: 3pt; padding: 0 4pt; white-space: nowrap; }
+  .ejemplo { background: #f4f5f9; border-left: 3pt solid #14213d; padding: 7pt 10pt; border-radius: 0 4pt 4pt 0; margin: 6pt 0 8pt; font-size: 10pt; }
+  .ejemplo .q { font-weight: 600; margin-bottom: 3pt; }
+  .confirma { background: #f4f5f9; border: 1pt solid #d9dce6; border-radius: 6pt; padding: 9pt 12pt; margin: 6pt 0 8pt; font-size: 10pt; }
+  .var { font-family: ui-monospace, Menlo, monospace; font-size: 8.8pt; background: #e8eaf4; color: #14213d; border-radius: 3pt; padding: 0 3pt; white-space: nowrap; }
+  .leyenda { display: block; color: #5b6272; font-size: 9pt; margin: 5pt 0; }
+  .btns { margin-top: 7pt; display: flex; gap: 8pt; }
+  .btn { display: inline-block; padding: 3pt 16pt; border-radius: 4pt; font-weight: 600; font-size: 9.5pt; }
+  .b-ok { background: #14213d; color: #fff; } .b-no { background: #fff; color: #14213d; border: 1pt solid #14213d; }
+  .pie { margin-top: 12pt; color: #6b7280; font-size: 9pt; }
+  .keep { break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<h1>Duma, el asistente de Muungano</h1>
+<p class="sub">Qué puede y qué no puede hacer · primera versión · propuesta</p>
+
+<p>Duma vive en un grupo privado de Telegram, <b>solo para administradores</b>, donde se le escribe como a una persona y contesta
+con texto o con archivos. Solo atiende a las personas autorizadas, en ese grupo y en ningún otro.</p>
+
+<div class="ejemplo keep">
+  <div class="q">Ejemplo de lo que se le puede pedir</div>
+  «Resumen de Alex Elizondo y su ciclo de Maratón de Chicago» → consolidado de entrenos, semana del ciclo y score.<br>
+  «¿Cómo le fue en su corrida más larga?» → la trae con ritmo promedio, frecuencia cardiaca y score.
+</div>
+
+<div class="cols keep">
+  <div class="col si">
+    <h3>Sí puede</h3>
+    <ul>
+      <li><b>Resumen de un atleta:</b> entrenos hechos contra programados, score, ritmo, frecuencia cardiaca, su entreno más largo y en qué semana de su ciclo va.</li>
+      <li><b>Consultar datos:</b> atletas, grupos, eventos, pagos y reportes, con lo que ya está en la plataforma.</li>
+      <li><b>Entregar archivos:</b> tablas en Excel o CSV, documentos y texto.</li>
+      <li><b>Entender lo que le mandas:</b> fotos, capturas y archivos.</li>
+      <li><b>Guardar y retomar temas:</b> si cambias de asunto, deja el anterior archivado y empieza limpio; puedes volver a él.</li>
+      <li><b>Gráficas</b> de tus datos (por ejemplo, ritmo o kilómetros por semana) y <b>notas de voz</b> <span class="tag">segunda etapa</span></li>
+    </ul>
+  </div>
+  <div class="col no">
+    <h3>No puede</h3>
+    <ul>
+      <li><b>Modificar ni borrar datos</b> de la plataforma. Solo consulta.</li>
+      <li><b>Hacer algo por su cuenta.</b> Todo lo que cambie algo o salga hacia afuera pide tu confirmación antes.</li>
+      <li><b>Atender a otras personas</b> ni a otros grupos, aunque tengan el enlace.</li>
+      <li><b>Inventar datos.</b> Si no lo encuentra, lo dice; cada cifra indica de dónde sale y cuándo se leyó.</li>
+      <li><b>Mostrar capturas de pantalla de sitios web</b> ni crear ilustraciones o fotos. Las gráficas de tus datos sí.</li>
+      <li><b>Responder sobre temas ajenos a Muungano.</b> Dice qué sí puede hacer.</li>
+    </ul>
+  </div>
+</div>
+
+<div class="keep">
+<h2>Confirma antes de actuar</h2>
+<p>Consultar no pide confirmación. Enviar algo o guardar algo, siempre sí, con el texto exacto que se va a ejecutar:</p>
+<div class="confirma keep">
+  <b>Voy a mandar esto</b> (correo y notificación) a <b>todos los activos: 428 atletas</b>:<br>
+  «Hola <span class="var">{{USER_FIRST_NAME}}</span>, en <span class="var">{{MONTH}}</span> completaste
+  <span class="var">{{WORKOUTS_DONE}}</span>/<span class="var">{{WORKOUTS_PLANNED}}</span> entrenos, con un score
+  promedio de <span class="var">{{AVG_SCORE}}</span>% y <span class="var">{{TOTAL_KM}}</span> km.
+  <span class="var">{{PACKRUNS}}</span> <span class="var">{{MAIN_EVENT}}</span>
+  <span class="var">{{MOTIVATION}}</span> <span class="var">{{TEAM_NEWS}}</span>»<br>
+  <span class="leyenda">Cambian por atleta: nombre, mes, entrenos hechos y programados, score, km, packruns, su evento
+  (solo si tiene) y la frase motivacional. Igual para todos: las noticias del team.<br>
+  Ejemplo con una atleta: «Hola Ana, en octubre completaste 24/26 entrenos…»</span><br>
+  ¿Confirmas?
+  <div class="btns"><span class="btn b-ok">Enviar</span><span class="btn b-no">Cancelar</span></div>
+</div>
+<p>Solo confirma quien lo pidió, el botón sirve una vez y caduca. Si no se pulsa, no pasa nada.</p>
+</div>
+
+<h2>Newsletter mensual por atleta <span class="tag">propuesta</span></h2>
+<p>Un correo y una notificación individual para cada atleta, enviados desde la propia plataforma de Muungano, con:</p>
+<ul>
+  <li>Sus próximos packruns («lugar, fecha») y, si tiene uno, «Su evento».</li>
+  <li>El recap de su mes: entrenos completados (por ejemplo 24/26), score promedio y kilómetros totales.</li>
+  <li>Un mensaje motivacional, tomado de un banco de frases que el equipo aprueba, y las noticias generales del team, que un administrador le dicta al asistente.</li>
+</ul>
+<p><b>A quién:</b> a todos, solo a ciertos grupos o solo a atletas específicos. <b>Siempre únicamente a los activos</b>; si
+eliges a alguien que no lo está, Duma te lo avisa y no se le manda.</p>
+<p>El primer día del mes la plataforma prepara los borradores, Duma muestra cuántos hay y algunos de muestra, y
+<b>nada sale hasta que un administrador pulsa «Enviar»</b>. Una vez enviado no se puede deshacer.</p>
+
+<h2>Privacidad y seguridad</h2>
+<ul>
+  <li>Los reportes fijos (resumen de atleta, newsletter) se arman en la plataforma y llegan al grupo <b>sin pasar por la IA</b>.</li>
+  <li>En análisis libre, los nombres de los atletas se cambian por códigos antes de pasar por la IA y se restituyen al responder. Lo que escribe el administrador sí lo lee la IA tal cual.</li>
+  <li>Duma solo lee a través de la plataforma; no tiene acceso directo a la base de datos.</li>
+  <li>Duma entra a la plataforma con <b>una credencial propia</b>, no con la cuenta de ningún administrador, y esa credencial solo sirve para consultar. Se puede cortar al instante.</li>
+  <li>Cada consulta queda registrada con el administrador que la hizo y la hora.</li>
+</ul>
+
+<p class="pie">Primera etapa: consultas, archivos y confirmaciones. Segunda: notas de voz y gráficas. Tercera: newsletter con confirmación.</p>
+
+</body>
+</html>

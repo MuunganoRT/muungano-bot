@@ -1,0 +1,588 @@
+"""The tools Duma's model can call.
+
+Two kinds. "Direct" tools (`buscar_atleta`, `resumen_atleta`, `buscar_atletas`)
+send what they find to the chat as text or a file built by `render`, and the
+model gets back only a short acknowledgement with no names in it. `cifras` and
+`consultar` answer the model: the first with totals, which identify nobody,
+and the second with one row per person where the name is a code. Either way
+the model never reads a name it was not given by the admin.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import unicodedata
+from dataclasses import dataclass
+from datetime import date
+from typing import Any, Optional
+
+from duma import confirmations
+from duma.api_client import ApiError, MuunganoApi
+from duma.confirmations import Confirmations
+from duma.preferences import PreferenceError, Preferences, clean
+from duma.pseudonyms import Pseudonyms
+from duma.render import _race_time, matches_csv, render_candidates, render_matches, render_summary
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class OutFile:
+    name: str
+    content: bytes
+
+
+@dataclass
+class ToolResult:
+    # Written to the chat as is. None when the tool has nothing to show.
+    direct_text: Optional[str]
+    # What the model sees. Never contains athlete names.
+    to_model: str
+    is_error: bool = False
+    # Attached to the chat with `direct_text` as its caption. The model never sees it.
+    file: Optional[OutFile] = None
+    # (label, callback data) pairs shown under `direct_text`: a proposal waiting for an admin's click.
+    buttons: Optional[list[tuple[str, str]]] = None
+
+
+FILTERS_SCHEMA: dict[str, Any] = {
+    "type": "array",
+    "maxItems": 8,
+    "items": {
+        "type": "object",
+        "properties": {
+            "tipo": {"type": "string", "enum": ["evento", "pago", "grupo", "entrenos"]},
+            "nombre": {
+                "type": "string",
+                "description": "Para `evento` y `grupo`: parte del nombre, mínimo 2 letras.",
+            },
+            "condicion": {
+                "type": "string",
+                "enum": ["inscritos", "ya_paso", "con_tiempo"],
+                "description": (
+                    "Solo `evento`. `inscritos` (por defecto) es cualquier inscripción; `ya_paso`, "
+                    "inscritos en un evento que ya ocurrió; `con_tiempo`, solo quienes tienen "
+                    "resultado registrado, que son pocos."
+                ),
+            },
+            "anio": {"type": "integer", "description": "Solo `evento`: año de la edición."},
+            "desde": {"type": "string", "description": "Para `pago` y `entrenos`: YYYY-MM-DD."},
+            "hasta": {"type": "string", "description": "Para `pago` y `entrenos`: YYYY-MM-DD."},
+            "minimo": {"type": "integer", "description": "Solo `entrenos`: mínimo de entrenos hechos."},
+        },
+        "required": ["tipo"],
+    },
+}
+
+SCHEMAS: list[dict[str, Any]] = [
+    {
+        "name": "buscar_atleta",
+        "description": (
+            "Busca personas del equipo por nombre (atletas, coaches y admins) y muestra la lista en el chat. Úsala "
+            "cuando el administrador quiera saber quién es alguien o cuántos se llaman así, sin pedir su resumen."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "texto": {"type": "string", "description": "Parte del nombre o apellido, mínimo 2 letras."},
+                "estado": {
+                    "type": "string",
+                    "enum": ["todos", "activos", "inactivos"],
+                    "description": (
+                        "Por defecto `todos` (activos y pausados). Usa `activos` o `inactivos` solo si el "
+                        "administrador pide únicamente unos u otros."
+                    ),
+                },
+            },
+            "required": ["texto"],
+        },
+    },
+    {
+        "name": "resumen_atleta",
+        "description": (
+            "Muestra en el chat el resumen de un atleta: entrenos hechos contra prescritos, score, ritmo y frecuencia "
+            "cardiaca promedio, su entreno más largo y, si tiene evento principal, su ciclo y la semana en que va. "
+            "Si el nombre es ambiguo, el administrador recibe la lista de candidatos y te contesta cuál; entonces "
+            "vuelve a llamarla con `grupo` o el nombre completo."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre y/o apellido del atleta."},
+                "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
+                "desde": {"type": "string", "description": "Fecha inicial YYYY-MM-DD. Por defecto, 30 días atrás."},
+                "hasta": {"type": "string", "description": "Fecha final YYYY-MM-DD. Por defecto, hoy."},
+                "ciclo": {
+                    "type": "boolean",
+                    "description": "Cubrir desde el inicio de su ciclo de entrenamiento hasta hoy (o la carrera).",
+                },
+            },
+            "required": ["nombre"],
+        },
+    },
+    {
+        "name": "buscar_atletas",
+        "description": (
+            "Muestra en el chat la lista de personas que cumplen TODOS los filtros a la vez: inscritos en un evento, "
+            "con un pago aprobado en un periodo, de un grupo, o con un mínimo de entrenos hechos. Sin filtros lista a "
+            "todo el equipo. Tú no ves la lista: recibes cuántos son y qué eventos o grupos entendió el API. Si un "
+            "nombre no coincidió con nada, díselo al administrador."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filtros": FILTERS_SCHEMA,
+                "estado": {
+                    "type": "string",
+                    "enum": ["todos", "activos", "inactivos"],
+                    "description": "Por defecto `todos` (activos y pausados).",
+                },
+                "solo_contar": {
+                    "type": "boolean",
+                    "description": "Solo el número, sin mostrar la lista. Para preguntas de «cuántos».",
+                },
+            },
+        },
+    },
+    {
+        "name": "cifras",
+        "description": (
+            "Totales sobre las personas que cumplen los filtros: cuántas son, pagos aprobados (cuántos y cuánto suman), "
+            "entrenos prescritos y hechos, kilómetros y score promedio. Te devuelve solo números, sin nombres, y nada "
+            "sale al chat: la respuesta la escribes tú con esas cifras, tal cual y con su periodo. Toda métrica que no "
+            "sea `personas` necesita `desde` y `hasta`. `entrenos`, `km` y `score` aceptan como máximo 60 personas y 92 "
+            "días; `pagos`, 366 días. Si el API pide acotar, díselo al administrador."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "metricas": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["personas", "pagos", "entrenos", "km", "score"]},
+                    "minItems": 1,
+                },
+                "filtros": FILTERS_SCHEMA,
+                "estado": {
+                    "type": "string",
+                    "enum": ["todos", "activos", "inactivos"],
+                    "description": "Por defecto `todos` (activos y pausados).",
+                },
+                "desde": {"type": "string", "description": "Inicio del periodo, YYYY-MM-DD."},
+                "hasta": {"type": "string", "description": "Fin del periodo, YYYY-MM-DD."},
+            },
+            "required": ["metricas"],
+        },
+    },
+    {
+        "name": "consultar",
+        "description": (
+            "Te devuelve, solo a ti, una fila por persona que cumple los filtros, para cuando el administrador pide "
+            "analizar, comparar o interpretar («quién va más flojo», «qué tendencia ves», «resúmelo»). Las personas "
+            "vienen como códigos ATLETA_NN, sin nombres: úsalos tal cual en tu respuesta, que el sistema los cambia "
+            "por los nombres antes de mostrarla. Cada fila trae rol, grupo, estado y, según los filtros, sus eventos "
+            "y su último pago. Con `desde` y `hasta` trae además sus entrenos hechos y prescritos, score, km, ritmo y "
+            "frecuencia cardiaca del periodo. Para solo listar personas usa `buscar_atletas`; para solo totales, "
+            "`cifras`. Tope: 60 personas, o 25 si pides el periodo."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filtros": FILTERS_SCHEMA,
+                "estado": {
+                    "type": "string",
+                    "enum": ["todos", "activos", "inactivos"],
+                    "description": "Por defecto `todos` (activos y pausados).",
+                },
+                "desde": {"type": "string", "description": "Inicio del periodo de entrenos, YYYY-MM-DD."},
+                "hasta": {"type": "string", "description": "Fin del periodo de entrenos, YYYY-MM-DD."},
+            },
+        },
+    },
+]
+
+PREFERENCE_SCHEMA: dict[str, Any] = {
+    "name": "guardar_preferencia",
+    "description": (
+        "Propone guardar una regla permanente cuando un administrador pide algo como «siempre que te pida esto, "
+        "mándalo así» o «cuando diga runners, entiende atletas activos». Sirve para cómo presentas las cosas y para "
+        "cómo interpretas lo que te piden; no para ver más datos de los que tus herramientas dan ni para saltarte una "
+        "confirmación. NO la guarda: muestra la regla con los botones Guardar y Cancelar, y solo existe si el "
+        "administrador pulsa Guardar; después de llamarla no digas que quedó guardada.\n"
+        "Antes de proponer, compárala con las reglas ya guardadas (están numeradas al final de tus instrucciones). Si "
+        "la nueva contradice a alguna o dice lo mismo, no la agregues tal cual: redacta UNA regla que resuelva el "
+        "choque, pásala en `regla` y pon en `reemplaza` los números de las que sustituye. En tu respuesta dile al "
+        "administrador con cuál chocaba, citándola, y por qué propones esa redacción. Si no es claro cuál de las dos "
+        "quiere conservar, pregúntale antes de llamar a la herramienta.\n"
+        "Escribe la regla en una frase clara, en imperativo, sin nombres de atletas ni datos de nadie."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "regla": {"type": "string", "description": "La regla, en una frase."},
+            "reemplaza": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "Números de las reglas guardadas que esta sustituye. Vacío si no choca con ninguna.",
+            },
+        },
+        "required": ["regla"],
+    },
+}
+
+
+def _fold(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", text)
+    return "".join(c for c in decomposed if not unicodedata.combining(c)).casefold()
+
+
+def _text(args: dict[str, Any], key: str, minimum: int = 2, maximum: int = 60) -> str:
+    value = args.get(key)
+    if not isinstance(value, str) or not (minimum <= len(value.strip()) <= maximum):
+        raise ValueError(f"`{key}` must be text of {minimum} to {maximum} characters")
+    return value.strip()
+
+
+def _iso_date(args: dict[str, Any], key: str) -> Optional[str]:
+    value = args.get(key)
+    if value in (None, ""):
+        return None
+    try:
+        return date.fromisoformat(str(value)).isoformat()
+    except ValueError:
+        raise ValueError(f"`{key}` must be a date as YYYY-MM-DD") from None
+
+
+STATUSES = {"todos": "all", "activos": "active", "inactivos": "inactive"}
+
+
+def _member_status(args: dict[str, Any]) -> str:
+    """`estado` as the API spells it. Everyone, active and paused, unless the admin narrowed it."""
+    value = args.get("estado") or "todos"
+    if value not in STATUSES:
+        raise ValueError("`estado` must be todos, activos or inactivos")
+    return STATUSES[value]
+
+
+EVENT_STATUSES = {"inscritos": "registered", "ya_paso": "past", "con_tiempo": "with_time"}
+MAX_FILTERS = 8
+# A longer list than this goes to the chat as a CSV file instead of text.
+QUERY_ROWS = 50
+# The most the API returns in one query.
+QUERY_LIMIT = 500
+# Rows the model may read at once. With a period each person costs one more API call, so fewer.
+ANALYZE_ROWS = 60
+ANALYZE_ROWS_WITH_PERIOD = 25
+ANALYZE_CONCURRENCY = 5
+
+
+def _integer(args: dict[str, Any], key: str, minimum: int, maximum: int) -> int:
+    value = args.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or not (minimum <= value <= maximum):
+        raise ValueError(f"`{key}` must be a whole number from {minimum} to {maximum}")
+    return value
+
+
+def _window(raw: dict[str, Any]) -> dict[str, str]:
+    start, end = _iso_date(raw, "desde"), _iso_date(raw, "hasta")
+    if not start or not end:
+        raise ValueError(f"a `{raw['tipo']}` filter needs `desde` and `hasta`")
+    if start > end:
+        raise ValueError("`desde` is after `hasta`")
+    return {"from": start, "to": end}
+
+
+def _filter(raw: Any) -> dict[str, Any]:
+    """One filter as the API spells it. The API validates again; this only gives the model a clear error."""
+    if not isinstance(raw, dict):
+        raise ValueError("each filter must be an object with `tipo`")
+    kind = raw.get("tipo")
+    if kind == "evento":
+        status = raw.get("condicion") or "inscritos"
+        if status not in EVENT_STATUSES:
+            raise ValueError("`condicion` must be inscritos, ya_paso or con_tiempo")
+        out: dict[str, Any] = {"type": "event", "name": _text(raw, "nombre"), "status": EVENT_STATUSES[status]}
+        if raw.get("anio") is not None:
+            out["year"] = _integer(raw, "anio", 2000, 2100)
+        return out
+    if kind == "grupo":
+        return {"type": "group", "name": _text(raw, "nombre")}
+    if kind == "pago":
+        return {"type": "paid", **_window(raw)}
+    if kind == "entrenos":
+        return {"type": "workouts", **_window(raw), "min_done": _integer(raw, "minimo", 1, 366)}
+    raise ValueError("`tipo` must be evento, pago, grupo or entrenos")
+
+
+METRICS = {"personas": "athletes", "pagos": "payments", "entrenos": "workouts", "km": "distance_km", "score": "score_avg"}
+
+
+def _filters(args: dict[str, Any]) -> list[dict[str, Any]]:
+    filters = args.get("filtros") or []
+    if not isinstance(filters, list) or len(filters) > MAX_FILTERS:
+        raise ValueError(f"`filtros` must be a list of at most {MAX_FILTERS} filters")
+    return [_filter(f) for f in filters]
+
+
+def _figures(found: dict[str, Any]) -> str:
+    """The totals as one line for the model. Only numbers: nothing here identifies anyone."""
+    parts = [f"Personas: {found['athletes']}."]
+    period = found.get("period")
+    if period:
+        parts.append(f"Periodo: {period['from']} a {period['to']}.")
+    payments = found.get("payments")
+    if payments:
+        entry = f"Pagos aprobados: {payments['count']}, suman ${payments['total']:,.2f} MXN"
+        if payments.get("without_amount"):
+            entry += f" ({payments['without_amount']} sin monto capturado, no suman)"
+        parts.append(entry + ".")
+    workouts = found.get("workouts")
+    if workouts:
+        entry = f"Entrenos: {workouts['done']} hechos de {workouts['prescribed']} prescritos"
+        if workouts.get("completion_pct") is not None:
+            entry += f" ({workouts['completion_pct']}%)"
+        parts.append(entry + ".")
+    if "distance_km" in found:
+        parts.append(f"Distancia: {found['distance_km']} km.")
+    if "score_avg" in found:
+        score = found["score_avg"]
+        parts.append("Score promedio: sin entrenos prescritos." if score is None else f"Score promedio: {score}%.")
+    return " ".join(parts)
+
+
+def _row(code: str, person: dict[str, Any], summary: Optional[dict[str, Any]]) -> str:
+    """One person for the model: a code and figures, nothing that is free text."""
+    parts = [code, person.get("role") or "sin rol", f"grupo {(person.get('group') or 'ninguno').strip()}"]
+    parts.append("activo" if person.get("active", True) else "inactivo")
+    for e in person.get("events", []):
+        result = f" tiempo {_race_time(e['time_result'])}" if e.get("time_result") else ""
+        parts.append(f"evento {e['event']} ({e['date']}){result}")
+    payment = person.get("last_payment")
+    if payment:
+        amount = f" ${payment['amount']:,.2f}" if payment.get("amount") is not None else " sin monto"
+        parts.append(f"último pago {payment['date']}{amount}")
+    if summary is not None:
+        workouts = summary["workouts"]
+        parts.append(f"entrenos {workouts['done']}/{workouts['prescribed']}")
+        for label, key, unit in (("score", "score_avg", "%"), ("km", "distance_km", ""), ("ritmo", "avg_pace", " min/km"), ("FC", "avg_heart_rate", " lpm")):
+            if summary.get(key) is not None:
+                parts.append(f"{label} {summary[key]}{unit}")
+    return " | ".join(parts)
+
+
+def _understood(found: dict[str, Any]) -> str:
+    """What the API matched, for the model: event and group names, never people."""
+    matched = found.get("matched") or {}
+    parts = []
+    if matched.get("events"):
+        parts.append("Eventos: " + "; ".join(matched["events"]) + ".")
+    if matched.get("groups"):
+        parts.append("Grupos: " + "; ".join(matched["groups"]) + ".")
+    if found.get("notes"):
+        parts.append("Avisos del API: " + "; ".join(found["notes"]) + ".")
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def preference_summary(rule: str, user_id: int, replaced: tuple[str, ...] = ()) -> str:
+    text = f"Regla permanente que pide el admin {user_id}:\n«{rule}»"
+    if replaced:
+        text += "\n\nReemplaza a:\n" + "\n".join(f"«{old}»" for old in replaced)
+    return text
+
+
+class Toolbox:
+    def __init__(
+        self,
+        api: MuunganoApi,
+        confirmations: Optional[Confirmations] = None,
+        preferences: Optional[Preferences] = None,
+    ):
+        self._api = api
+        self._confirmations = confirmations
+        self._preferences = preferences
+        # Without somewhere to keep proposals and rules, the model is not offered the tool at all.
+        self._schemas = SCHEMAS + [PREFERENCE_SCHEMA] if confirmations and preferences else SCHEMAS
+
+    @property
+    def schemas(self) -> list[dict[str, Any]]:
+        return self._schemas
+
+    async def run(
+        self, name: str, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms] = None
+    ) -> ToolResult:
+        names = names if names is not None else Pseudonyms()
+        handlers = {
+            "buscar_atleta": self._search,
+            "resumen_atleta": self._summary,
+            "buscar_atletas": self._query,
+            "cifras": self._aggregate,
+            "consultar": lambda a, u: self._analyze(a, u, names),
+        }
+        handlers["resumen_atleta"] = lambda a, u: self._summary(a, u, names)
+        if self._confirmations and self._preferences:
+            handlers["guardar_preferencia"] = self._propose_preference
+        handler = handlers.get(name)
+        if handler is None:
+            return ToolResult(None, f"Unknown tool {name!r}", is_error=True)
+        try:
+            return await handler(args, telegram_user_id)
+        except PreferenceError as exc:
+            return ToolResult(None, f"No se puede guardar: {exc}", is_error=True)
+        except ValueError as exc:
+            return ToolResult(None, str(exc), is_error=True)
+        except ApiError as exc:
+            # The admin only gets the model's paraphrase; the real cause has to be visible somewhere.
+            log.warning("tool %s failed: API status %s: %s", name, exc.status, exc.message)
+            return ToolResult(None, exc.message, is_error=True)
+
+    async def _find(self, text: str, member_status: str, telegram_user_id: int) -> dict[str, Any]:
+        return await self._api.get(
+            "/assistant/athletes",
+            telegram_user_id=telegram_user_id,
+            params={"q": text, "member_status": member_status},
+        )
+
+    async def _search(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        found = await self._find(_text(args, "texto"), _member_status(args), telegram_user_id)
+        athletes, total = found["athletes"], found["total"]
+        return ToolResult(
+            render_candidates(athletes, total, question=False),
+            f"{total} resultado(s); ya los mostré en el chat.",
+        )
+
+    async def _query(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        body: dict[str, Any] = {"filters": _filters(args), "member_status": _member_status(args)}
+        count_only = args.get("solo_contar") is True
+        if count_only:
+            body["count_only"] = True
+        else:
+            body["limit"] = QUERY_LIMIT
+        found = await self._api.post("/assistant/athletes/query", telegram_user_id=telegram_user_id, json=body)
+
+        total = found["total"]
+        if count_only:
+            return ToolResult(None, f"{total} persona(s) cumplen los filtros.{_understood(found)}")
+        if total <= QUERY_ROWS:
+            return ToolResult(render_matches(found), f"{total} resultado(s); ya los mostré en el chat.{_understood(found)}")
+
+        shown = found["returned"]
+        caption = f"{total} personas. Va la lista completa en el archivo."
+        left = ""
+        if shown < total:
+            caption = f"{total} personas. El archivo trae las primeras {shown}; acota los filtros para ver al resto."
+            left = f" El archivo solo trae {shown}; dile que acote."
+        return ToolResult(
+            caption,
+            f"{total} resultado(s); mandé la lista al chat como archivo CSV.{left}{_understood(found)}",
+            file=OutFile("atletas.csv", matches_csv(found)),
+        )
+
+    async def _propose_preference(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        if not isinstance(args.get("regla"), str):
+            raise ValueError("`regla` must be text")
+        rule = clean(args["regla"])
+        lines, rules = self._preferences.lines(), self._preferences.rules()
+        numbers = args.get("reemplaza") or []
+        if not isinstance(numbers, list) or any(
+            isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= len(lines) for n in numbers
+        ):
+            raise ValueError(f"`reemplaza` must be a list of rule numbers from 1 to {len(lines)}")
+        picked = sorted(set(numbers))
+        self._preferences.check_room(replacing=len(picked))
+        summary = preference_summary(rule, telegram_user_id, tuple(rules[n - 1] for n in picked))
+        payload = {"rule": rule, "replace": [lines[n - 1] for n in picked]}
+        action_id = await self._confirmations.propose(telegram_user_id, "preference_add", payload, summary)
+        return ToolResult(
+            summary,
+            "Mostré la regla con los botones Guardar y Cancelar. Todavía NO está guardada: lo decide el administrador "
+            "al pulsar. No digas que quedó guardada."
+            + (" Explícale con cuál regla chocaba y por qué propones esta redacción." if picked else ""),
+            buttons=confirmations.buttons(action_id, "Guardar"),
+        )
+
+    async def _aggregate(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        wanted = args.get("metricas")
+        if not isinstance(wanted, list) or not wanted or any(m not in METRICS for m in wanted):
+            raise ValueError("`metricas` must be a list with any of: " + ", ".join(METRICS))
+        metrics = list(dict.fromkeys(METRICS[m] for m in wanted))
+        body: dict[str, Any] = {"filters": _filters(args), "member_status": _member_status(args), "metrics": metrics}
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        if metrics != ["athletes"]:
+            if not start or not end:
+                raise ValueError("those metrics need `desde` and `hasta`")
+            if start > end:
+                raise ValueError("`desde` is after `hasta`")
+            body["period"] = {"from": start, "to": end}
+        found = await self._api.post("/assistant/athletes/aggregate", telegram_user_id=telegram_user_id, json=body)
+        return ToolResult(None, _figures(found) + _understood(found))
+
+    async def _analyze(self, args: dict[str, Any], telegram_user_id: int, names: Pseudonyms) -> ToolResult:
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        if bool(start) != bool(end):
+            raise ValueError("give both `desde` and `hasta`, or neither")
+        if start and start > end:
+            raise ValueError("`desde` is after `hasta`")
+        cap = ANALYZE_ROWS_WITH_PERIOD if start else ANALYZE_ROWS
+        body = {"filters": _filters(args), "member_status": _member_status(args), "limit": cap}
+        found = await self._api.post("/assistant/athletes/query", telegram_user_id=telegram_user_id, json=body)
+        total = found["total"]
+        if total > cap:
+            # Part of the list would read as the whole list: the analysis would be wrong without saying so.
+            raise ValueError(f"{total} people match and at most {cap} can be analysed at once; narrow the filters")
+        people = found["athletes"]
+        if not people:
+            return ToolResult(None, f"Nadie cumple esos filtros.{_understood(found)}")
+
+        summaries: list[Optional[dict[str, Any]]] = [None] * len(people)
+        if start:
+            gate = asyncio.Semaphore(ANALYZE_CONCURRENCY)
+
+            async def one(person: dict[str, Any]) -> dict[str, Any]:
+                async with gate:
+                    return await self._api.get(
+                        f"/assistant/athletes/{person['id']}/summary",
+                        telegram_user_id=telegram_user_id,
+                        params={"from": start, "to": end},
+                    )
+
+            summaries = list(await asyncio.gather(*(one(p) for p in people)))
+
+        rows = [_row(names.code(p["id"], p["name"]), p, s) for p, s in zip(people, summaries)]
+        period = f" Periodo de entrenos: {start} a {end}." if start else ""
+        return ToolResult(None, f"{total} persona(s).{period}{_understood(found)}\n" + "\n".join(rows))
+
+    async def _summary(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms] = None) -> ToolResult:
+        name = _text(args, "nombre")
+        group = args.get("grupo")
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+
+        known = names.athlete_id(name) if names else None
+        if known is not None:
+            candidates = [{"id": known}]
+        else:
+            found = await self._find(name, "all", telegram_user_id)
+            candidates = found["athletes"]
+        if known is None and isinstance(group, str) and group.strip():
+            wanted = _fold(group.strip())
+            candidates = [a for a in candidates if wanted in _fold(a.get("group") or "")]
+
+        if not candidates:
+            return ToolResult("No encontré a nadie con ese nombre.", "Sin resultados; ya se lo dije al administrador.")
+        if len(candidates) > 1:
+            return ToolResult(
+                render_candidates(candidates, len(candidates), question=True),
+                f"Hay {len(candidates)} candidatos; ya le pregunté al administrador cuál. Espera su respuesta.",
+            )
+
+        params: dict[str, Any] = {}
+        if start:
+            params["from"] = start
+        if end:
+            params["to"] = end
+        if args.get("ciclo"):
+            params["use_cycle"] = "true"
+        data = await self._api.get(
+            f"/assistant/athletes/{candidates[0]['id']}/summary", telegram_user_id=telegram_user_id, params=params
+        )
+        done, prescribed = data["workouts"]["done"], data["workouts"]["prescribed"]
+        return ToolResult(render_summary(data), f"Resumen enviado al chat: {done} de {prescribed} entrenos.")
