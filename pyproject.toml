@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Duma, the Telegram assistant of Muungano RT"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=1.4",
+    # 1.11 is what the caching and effort parameters were tested with.
+    "anthropic>=1.11",
     "asyncpg>=0.30",
     "httpx>=0.28",
     "python-dotenv>=1.0",
