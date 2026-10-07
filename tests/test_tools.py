@@ -68,6 +68,7 @@ class FakeApi:
 
     workouts = {
         "success": True,
+        "athlete": {"id": 10, "name": "Ana Peña"},
         "period": {"from": "2026-09-01", "to": "2026-09-30"},
         "total": 2,
         "truncated": False,
@@ -80,7 +81,9 @@ class FakeApi:
     }
     laps = {
         "success": True,
+        "athlete": {"id": 10, "name": "Ana Peña"},
         "date": "2026-09-20",
+        "workout": {"distance_km": 32.1, "duration_sec": 9690.0, "pace": "5:02", "heart_rate": None},
         "total": 2,
         "truncated": False,
         "laps": [
@@ -617,15 +620,21 @@ async def test_a_group_filter_can_join_several_groups():
     assert bad.is_error
 
 
-async def test_one_athletes_workouts_go_to_the_model_as_figures_and_never_to_the_chat():
+PNG = b"\x89PNG"
+TABLE_NOTE = "La tabla ya salió al chat como imagen: no repitas sus cifras; comenta en dos o tres líneas lo que importa."
+
+
+async def test_one_athletes_workouts_go_to_the_chat_as_a_picture_and_to_the_model_as_figures():
     api = FakeApi([ANA_P])
     args = {"nombre": "ana pena", "ciclo": True, "km_min": 30, "km_max": 34}
     r = await Toolbox(api).run("entrenos_atleta", args, 956)
-    assert r.direct_text is None and r.file is None and not r.is_error
+    assert r.direct_text == "" and not r.is_error
+    assert r.file.photo and r.file.name == "entrenos.png" and r.file.content.startswith(PNG)
     assert r.to_model.splitlines() == [
         "2 entreno(s) hechos del 2026-09-01 al 2026-09-30. El número tras # es el que pide `vueltas_entreno`.",
         "#1 | 2026-09-10 | Easy Run | 10.0 km | 0:55:00 | 5:30 min/km | FC 150 lpm | score 95.0%",
         "#2 | 2026-09-20 | Quality Session | 32.1 km | 2:41:30 | 5:02 min/km | score 98.0% | 2 vueltas",
+        TABLE_NOTE,
     ]
     assert "Ana" not in r.to_model
     path, params, user = api.calls[-1]
@@ -659,12 +668,25 @@ async def test_workouts_refuse_a_bad_distance_and_ask_the_admin_about_a_namesake
 async def test_the_laps_of_one_workout():
     api = FakeApi([ANA_P])
     r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2}, 956)
-    assert r.direct_text is None and not r.is_error
+    assert r.direct_text == "" and not r.is_error
+    assert r.file.photo and r.file.name == "vueltas.png" and r.file.content.startswith(PNG)
     assert r.to_model.splitlines() == [
         "Entreno #2 del 2026-09-20: 2 vuelta(s).",
         "vuelta 1 | 31000 m | 2:35:30 | 5:01 min/km | FC 172 lpm | score 98.0%",
         "vuelta 2 | 1100 m | 0:06:00 | 5:27 min/km",
+        TABLE_NOTE,
     ]
+
+    # An API that does not send the name or the totals yet still gets its table.
+    api.laps = {k: v for k, v in FakeApi.laps.items() if k not in ("athlete", "workout")}
+    r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2}, 956)
+    assert r.file.content.startswith(PNG)
+
+    many = [{**FakeApi.laps["laps"][0], "lap": n} for n in range(1, 43)]
+    api.laps = {**FakeApi.laps, "total": 42, "laps": many}
+    r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2}, 956)
+    assert r.file is None and r.direct_text is None and "demasiadas vueltas" in r.to_model
+    api.laps = FakeApi.laps
     assert api.calls[-1][0] == "/assistant/athletes/10/workouts/2/laps"
 
     api.laps = {**FakeApi.laps, "total": 0, "laps": []}

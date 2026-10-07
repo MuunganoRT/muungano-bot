@@ -6,8 +6,9 @@ a chart drawn by `charts`, and the model gets back only a short acknowledgement
 with no names in it. `cifras`, `catalogo` and `consultar` answer the model:
 with totals, which identify nobody; with the names of groups and events; and
 with one row per person where the name is a code. `entrenos_atleta` and
-`vueltas_entreno` answer the model too, with one athlete's workouts and laps as
-figures and no name at all. Either way the model never reads a person's name
+`vueltas_entreno` do both: the chat gets a table drawn by `charts`, with the
+athlete's name on it, and the model gets the same figures with no name at
+all. Either way the model never reads a person's name
 it was not given by the admin.
 """
 
@@ -26,7 +27,7 @@ from duma.api_client import ApiError, MuunganoApi
 from duma.confirmations import Confirmations
 from duma.preferences import PreferenceError, Preferences, clean
 from duma.pseudonyms import Pseudonyms
-from duma.render import _period, _race_time, matches_csv, render_candidates, render_matches, render_summary
+from duma.render import _day, _day_year, _num, _period, _race_time, matches_csv, render_candidates, render_matches, render_summary
 
 log = logging.getLogger(__name__)
 
@@ -139,8 +140,9 @@ SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "entrenos_atleta",
         "description": (
-            "Te devuelve, solo a ti, los entrenos que hizo un atleta, uno por fila: número del entreno, fecha, tipo, "
-            "km, duración, ritmo, frecuencia cardiaca, score y cuántas vueltas tiene. Úsala cuando pregunten por un "
+            "Manda al chat una tabla (imagen) con los entrenos que hizo un atleta y te devuelve a ti las mismas "
+            "filas: número del entreno, fecha, tipo, km, duración, ritmo, frecuencia cardiaca, score y cuántas "
+            "vueltas tiene. Úsala cuando pregunten por un "
             "entreno en particular («su tirada de 32 km», «qué hizo el martes», «cuáles entrenos estás contando») o "
             "cuando necesites sus ritmos y distancias para razonar o estimar algo. Con `km_min` y `km_max` buscas "
             "por distancia: para «el de 32 km» pide de 30 a 34. No trae los entrenos no hechos ni el título que "
@@ -167,8 +169,8 @@ SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "vueltas_entreno",
         "description": (
-            "Te devuelve, solo a ti, el desglose por vuelta (lap) de un entreno: distancia, duración, ritmo, "
-            "frecuencia cardiaca y score de cada una. Una vuelta sin score es una que la prescripción no califica, "
+            "Manda al chat una tabla (imagen) con el desglose por vuelta (lap) de un entreno y te devuelve a ti las "
+            "mismas filas: distancia, duración, ritmo, frecuencia cardiaca y score de cada una. Una vuelta sin score es una que la prescripción no califica, "
             "como una recuperación. `entreno` es el número que trae la fila de `entrenos_atleta`: llama primero a "
             "esa."
         ),
@@ -569,6 +571,33 @@ def _lap_row(lap: dict[str, Any]) -> str:
     return " | ".join([f"vuelta {lap['lap']}", distance, *_measures(lap)])
 
 
+WORKOUT_COLUMNS = [
+    ("Fecha", 1.1, "left"), ("Tipo", 2.0, "left"), ("Km", 1.0, "right"), ("Tiempo", 1.3, "right"),
+    ("Ritmo", 1.0, "right"), ("FC", 0.8, "right"), ("Score", 1.0, "right"),
+]
+LAP_COLUMNS = [
+    ("Vuelta", 0.7, "left"), ("Distancia", 1.4, "right"), ("Tiempo", 1.5, "right"),
+    ("Ritmo", 1.3, "right"), ("FC", 1.2, "right"), ("Score", 1.2, "right"),
+]
+TABLE_SENT = " La tabla ya salió al chat como imagen: no repitas sus cifras; comenta en dos o tres líneas lo que importa."
+
+
+def _cells(row: dict[str, Any]) -> list[str]:
+    """Time, pace, heart rate and score as table cells, with a dash where there is none."""
+    return [
+        _race_time(round(row["duration_sec"])) if row.get("duration_sec") else charts.EMPTY_CELL,
+        row.get("pace") or charts.EMPTY_CELL,
+        f"{row['heart_rate']:.0f}" if row.get("heart_rate") else charts.EMPTY_CELL,
+        f"{_num(row['score'])}%" if row.get("score") is not None else charts.EMPTY_CELL,
+    ]
+
+
+def _distance(metres: Optional[float]) -> str:
+    if not metres:
+        return charts.EMPTY_CELL
+    return f"{metres / 1000:.2f} km" if metres >= 1000 else f"{metres:.0f} m"
+
+
 def _candidate_label(athlete: dict[str, Any]) -> str:
     group = athlete.get("group")
     label = f"{athlete['name']} · {group}" if group else athlete["name"]
@@ -932,11 +961,21 @@ class Toolbox:
         if not workouts:
             return ToolResult(None, f"Sin entrenos hechos {period} con esos filtros.")
         kept = f" Van solo los {len(workouts)} más largos." if data.get("truncated") else ""
-        return ToolResult(
-            None,
+        to_model = (
             f"{data['total']} entreno(s) hechos {period}.{kept} El número tras # es el que pide `vueltas_entreno`.\n"
-            + "\n".join(_workout_row(w) for w in workouts),
+            + "\n".join(_workout_row(w) for w in workouts)
         )
+        shown = workouts[-charts.TABLE_MAX_ROWS :]
+        count = f"{len(workouts)} entrenos" if len(shown) == len(workouts) else f"los últimos {len(shown)} de {len(workouts)}"
+        png = await asyncio.to_thread(
+            charts.table_png,
+            "Entrenos",
+            (data.get("athlete") or {}).get("name") or "Entrenos",
+            f"{_period(data['period']['from'], data['period']['to'])}  ·  {count}",
+            WORKOUT_COLUMNS,
+            [[_day(w["date"]), w.get("type") or charts.EMPTY_CELL, f"{w['distance_km']:.1f}", *_cells(w)] for w in shown],
+        )
+        return ToolResult("", to_model + "\n" + TABLE_SENT.strip(), file=OutFile("entrenos.png", png, photo=True))
 
     async def _laps(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
         workout_id = _integer(args, "entreno", 1, 2**31 - 1)
@@ -951,11 +990,27 @@ class Toolbox:
         if not laps:
             return ToolResult(None, f"El entreno #{workout_id} del {data['date']} no tiene vueltas registradas.")
         kept = f" Van solo las primeras {len(laps)}." if data.get("truncated") else ""
-        return ToolResult(
-            None,
+        to_model = (
             f"Entreno #{workout_id} del {data['date']}: {data['total']} vuelta(s).{kept}\n"
-            + "\n".join(_lap_row(lap) for lap in laps),
+            + "\n".join(_lap_row(lap) for lap in laps)
         )
+        if len(laps) > charts.TABLE_MAX_ROWS:
+            return ToolResult(None, to_model + "\nSon demasiadas vueltas para una tabla: resume tú lo que importa.")
+        whole = data.get("workout") or {}
+        totals = [f"{whole['distance_km']:.2f} km"] if whole.get("distance_km") else []
+        totals += [c for c in _cells(whole)[:1] if c != charts.EMPTY_CELL]
+        totals += [f"{whole['pace']} min/km"] if whole.get("pace") else []
+        totals += [f"FC {whole['heart_rate']:.0f} lpm"] if whole.get("heart_rate") else []
+        name = (data.get("athlete") or {}).get("name")
+        png = await asyncio.to_thread(
+            charts.table_png,
+            "Vueltas",
+            f"{name} · {_day_year(data['date'])}" if name else _day_year(data["date"]),
+            "  ·  ".join(totals) or f"{data['total']} vueltas",
+            LAP_COLUMNS,
+            [[str(lap["lap"]), _distance(lap.get("distance_m")), *_cells(lap)] for lap in laps],
+        )
+        return ToolResult("", to_model + "\n" + TABLE_SENT.strip(), file=OutFile("vueltas.png", png, photo=True))
 
     async def _summary(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms] = None) -> ToolResult:
         start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")

@@ -1,6 +1,6 @@
 import pytest
 
-from duma.charts import METRICS, has_data, has_spread, ranked, ranking_png, spread_png, weekly_png
+from duma.charts import METRICS, TABLE_MAX_ROWS, has_data, has_spread, ranked, ranking_png, spread_png, table_png, weekly_png
 
 WEEKS = [
     {"week_start": "2026-09-07", "prescribed": 5, "done": 4, "distance_km": 38.2, "score_avg": 71.0},
@@ -66,3 +66,20 @@ def test_the_spread_draws_with_empty_weeks_and_knows_when_there_is_nothing():
     ]
     assert spread_png(weeks, "Maratón").startswith(b"\x89PNG")
     assert has_spread(weeks) and not has_spread([weeks[1]])
+
+
+COLUMNS = [("Vuelta", 1.0, "left"), ("Ritmo", 1.0, "right"), ("Score", 1.0, "right")]
+
+
+def test_a_table_draws_a_png_that_grows_with_its_rows():
+    one = table_png("Vueltas", "Ana Peña · 20 sep 2026", "30 km", COLUMNS, [["1", "5:22", "98%"]])
+    many = table_png("Vueltas", "Ana Peña · 20 sep 2026", "30 km", COLUMNS, [[str(n), "5:22", "—"] for n in range(TABLE_MAX_ROWS)])
+    assert one.startswith(b"\x89PNG") and len(many) > len(one)
+    # Deterministic: the spots are the same on every table.
+    assert one == table_png("Vueltas", "Ana Peña · 20 sep 2026", "30 km", COLUMNS, [["1", "5:22", "98%"]])
+
+
+def test_a_table_refuses_no_rows_too_many_or_a_ragged_one():
+    for rows in ([], [["1", "5:22"]], [["1", "5:22", "98%"]] * (TABLE_MAX_ROWS + 1)):
+        with pytest.raises(ValueError):
+            table_png("Vueltas", "t", "s", COLUMNS, rows)

@@ -7,10 +7,13 @@ Nothing is written to disk, and no data leaves the machine to be drawn.
 from __future__ import annotations
 
 import io
+import math
+import random
 from typing import Any
 
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
+from matplotlib.patches import Polygon
 
 from duma.render import _day, _num
 
@@ -209,3 +212,98 @@ def weekly_png(weeks: list[dict[str, Any]], metric: str, subtitle: str) -> bytes
 
 def _text() -> dict[str, Any]:
     return {"color": INK, "fontsize": 10, "fontfamily": FONT}
+
+
+# ── Tables ─────────────────────────────────────────────────────────────
+#
+# The app icon's look: black, its dark spots in the top right corner, white text.
+
+TABLE_BACKGROUND = "#000000"
+TABLE_SPOT = "#2e2e2e"
+TABLE_INK = "#ffffff"
+TABLE_MUTED = "#a1a1aa"
+TABLE_RULE = "#3f3f46"
+TABLE_BRAND = "#f08a1c"
+TABLE_FOOTER = "Duma · Muungano Running Team"
+TABLE_WIDTH_IN = 9.0
+TABLE_ROW_IN = 0.46
+# Past this the picture is too tall to read on a phone without scrolling it like a file.
+TABLE_MAX_ROWS = 40
+EMPTY_CELL = "—"
+
+
+def _spot(cx: float, cy: float, radius: float, angle: float, rng: random.Random, aspect: float) -> Polygon:
+    """A bean-like blob: a circle bent by two low harmonics, stretched and turned."""
+    second, third = rng.uniform(0, 2 * math.pi), rng.uniform(0, 2 * math.pi)
+    points = []
+    for step in range(72):
+        t = 2 * math.pi * step / 72
+        r = radius * (1 + 0.16 * math.sin(2 * t + second) + 0.09 * math.sin(3 * t + third))
+        x, y = r * 1.55 * math.cos(t), r * math.sin(t)
+        points.append(
+            (cx + (x * math.cos(angle) - y * math.sin(angle)) / aspect, cy + x * math.sin(angle) + y * math.cos(angle))
+        )
+    return Polygon(points, closed=True, facecolor=TABLE_SPOT, edgecolor="none", zorder=0)
+
+
+def _spots(axes: Any, height: float) -> None:
+    """The same spots on every table: a fixed seed, placed in inches from the corner and kept apart."""
+    rng = random.Random(11)
+    placed: list[tuple[float, float, float]] = []
+    for _ in range(4000):
+        if len(placed) == 13:
+            break
+        far, turn = rng.uniform(0.0, 3.4), rng.uniform(math.pi, 1.5 * math.pi)
+        x, y = TABLE_WIDTH_IN + 0.15 + far * math.cos(turn), height + 0.15 + far * math.sin(turn)
+        radius = rng.uniform(0.13, 0.30) * (1.05 - far / 6.5)
+        if any(math.hypot(x - a, y - b) < 1.7 * (radius + other) + 0.10 for a, b, other in placed):
+            continue
+        placed.append((x, y, radius))
+        axes.add_patch(_spot(x / TABLE_WIDTH_IN, y / height, radius / height, rng.uniform(0.6, 1.1), rng, TABLE_WIDTH_IN / height))
+
+
+def table_png(label: str, title: str, subtitle: str, columns: list[tuple[str, float, str]], rows: list[list[str]]) -> bytes:
+    """A table as a picture. Each column is (heading, relative width, "left" or "right"); the last one is highlighted."""
+    if not rows or len(rows) > TABLE_MAX_ROWS or any(len(row) != len(columns) for row in rows):
+        raise ValueError(f"a table takes 1 to {TABLE_MAX_ROWS} rows, each with one cell per column")
+    height = 2.65 + TABLE_ROW_IN * len(rows)
+    figure = Figure(figsize=(TABLE_WIDTH_IN, height), dpi=DPI, facecolor=TABLE_BACKGROUND)
+    FigureCanvasAgg(figure)
+    axes = figure.add_axes((0, 0, 1, 1))
+    axes.set_axis_off()
+    axes.set_xlim(0, 1)
+    axes.set_ylim(0, 1)
+    _spots(axes, height)
+
+    left, right = 0.05, 0.95
+    top = 1 - 0.30 / height
+    axes.text(left, top, label.upper(), color=TABLE_BRAND, fontsize=10.5, fontweight="bold", fontfamily=FONT, va="top")
+    axes.text(left, top - 0.34 / height, title, color=TABLE_INK, fontsize=21, fontweight="bold", fontfamily=FONT, va="top")
+    axes.text(left, top - 0.86 / height, subtitle, color=TABLE_MUTED, fontsize=11.5, fontfamily=FONT, va="top")
+
+    total = sum(width for _, width, _ in columns)
+    anchors, edge = [], left
+    for _, width, align in columns:
+        span = (right - left) * width / total
+        anchors.append(edge if align == "left" else edge + span)
+        edge += span
+
+    head = top - 1.45 / height
+    for (heading, _, align), x in zip(columns, anchors):
+        axes.text(x, head, heading.upper(), color=TABLE_MUTED, fontsize=9.5, fontweight="bold", fontfamily=FONT, ha=align, va="center")
+    step = TABLE_ROW_IN / height
+    line = head - step * 0.62
+    axes.plot([left, right], [line, line], color=TABLE_RULE, linewidth=1.0)
+    last = len(columns) - 1
+    for n, row in enumerate(rows):
+        y = line - step * (n + 0.5)
+        for i, ((_, _, align), x, cell) in enumerate(zip(columns, anchors, row)):
+            color = TABLE_MUTED if cell == EMPTY_CELL else TABLE_BRAND if i == last else TABLE_INK
+            weight = "bold" if i in (0, last) else "normal"
+            axes.text(x, y, cell, color=color, fontsize=13.5, fontweight=weight, fontfamily=FONT, ha=align, va="center")
+        axes.plot([left, right], [y - step / 2] * 2, color=TABLE_RULE, linewidth=0.6)
+
+    axes.text(left, 0.30 / height, TABLE_FOOTER, color=MUTED, fontsize=9, fontfamily=FONT, va="center")
+    out = io.BytesIO()
+    figure.savefig(out, format="png", facecolor=TABLE_BACKGROUND)
+    return out.getvalue()

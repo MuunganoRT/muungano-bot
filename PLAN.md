@@ -58,6 +58,8 @@ haga las consultas previas que necesite y, si queda duda, pregunte. Es regla gen
 - `muungano-bot` (`main`): herramientas `entrenos_atleta` y `vueltas_entreno`, que le contestan al modelo; sus rutas en `duma/api_client.py`; y en `prompts/system.md`, cuándo usarlas y que una proyección de carrera es un rango razonado para el coach.
 - Probado: pruebas automáticas de los dos repos, y las dos rutas contra los datos locales (una tirada de 32 km con 4 vueltas). Sin probar con el modelo real.
 
+**Tablas como imagen, escrito el 2026-10-07 (sin subir):** la primera respuesta real de `entrenos_atleta` salió larga y llena de cifras. Ahora las dos herramientas mandan al chat una tabla dibujada por `charts.table_png` (fondo negro, las manchas del icono en la esquina, texto blanco; hasta 40 filas) y el modelo recibe las mismas filas con la instrucción de no repetirlas. El prompt pide dos o tres líneas y, en una estimación, el rango y una razón. El API (`dev`) agrega `athlete` a las dos rutas y `workout` (totales) a la de vueltas, para el título de la imagen; el bot dibuja la tabla aunque no vengan.
+
 **Lo siguiente, en orden:**
 1. El menú de comandos al escribir `/` le aparece a Alex en el iPhone y no en la Mac. Comprobado en producción con
    `getMyCommands`: los seis comandos están en el alcance `chat` del grupo y en ningún otro. Es el cliente de Mac;
