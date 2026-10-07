@@ -27,6 +27,12 @@ class FakeApi:
         self.calls.append((path, params, telegram_user_id))
         if self.fail:
             raise self.fail
+        if path == "/assistant/catalog":
+            return {
+                "success": True,
+                "groups": [{"name": "42k MTY 3:45+", "members": 7}, {"name": "Berlin 4:00hr", "members": 4}],
+                "events": [{"name": "Maratón de Chicago", "date": "2026-10-11"}],
+            }
         if path == "/assistant/athletes":
             return {"success": True, "athletes": self.athletes, "total": len(self.athletes)}
         return self.summary
@@ -532,3 +538,54 @@ async def test_ranking_and_spread_refuse_what_they_cannot_draw_before_calling_th
     ):
         assert (await box.run("grafica", args, 1)).is_error, args
     assert api.calls == []
+
+
+async def test_the_catalogue_goes_to_the_model_only_with_names_and_head_counts():
+    api = FakeApi([])
+    r = await Toolbox(api).run("catalogo", {}, 956)
+    assert api.calls[-1] == ("/assistant/catalog", None, 956)
+    assert r.direct_text is None and r.file is None and not r.is_error
+    assert r.to_model == (
+        "Grupos (miembros): 42k MTY 3:45+ (7); Berlin 4:00hr (4).\nEventos (fecha): Maratón de Chicago (2026-10-11)."
+    )
+
+
+async def test_a_question_goes_to_the_chat_with_one_button_per_option_for_who_asked():
+    r = await Toolbox(FakeApi([])).run(
+        "preguntar", {"pregunta": "¿Cuál grupo?", "opciones": ["42k MTY, los 5 grupos", " Berlin 4:00hr "]}, 956
+    )
+    assert r.direct_text == "¿Cuál grupo?" and not r.is_error
+    assert r.buttons == [("42k MTY, los 5 grupos", "q:956:0"), ("Berlin 4:00hr", "q:956:1")]
+    assert "No hagas nada más" in r.to_model
+
+
+async def test_a_question_needs_real_options():
+    box = Toolbox(FakeApi([]))
+    for options in (["solo una"], ["a", "a"], ["a", "x" * 41], ["a", 3], "a,b", [str(i) for i in range(9)]):
+        assert (await box.run("preguntar", {"pregunta": "¿Cuál?", "opciones": options}, 1)).is_error, options
+
+
+async def test_ambiguous_athletes_come_with_a_button_each():
+    r = await Toolbox(FakeApi([ANA_P, ANA_R])).run("resumen_atleta", {"nombre": "ana"}, 956)
+    assert r.buttons == [("Ana Peña · Maratón", "q:956:0"), ("Ana Ruiz · Fondo 10K", "q:956:1")]
+    # Same name and group: a button could not tell them apart.
+    twins = await Toolbox(FakeApi([ANA_P, dict(ANA_P, id=99)])).run("resumen_atleta", {"nombre": "ana"}, 956)
+    assert twins.buttons is None and "¿Cuál?" in twins.direct_text
+
+
+def test_parse_choice_takes_only_its_own_buttons():
+    from duma.tools import parse_choice
+
+    assert parse_choice("q:956:2") == (956, 2)
+    for data in ("ok:abc", "q:956", "q::1", "q:abc:1", "q:956:x", "", None):
+        assert parse_choice(data) is None, data
+
+
+async def test_a_group_filter_can_join_several_groups():
+    api = FakeApi([])
+    await Toolbox(api).run(
+        "cifras", {"metricas": ["personas"], "filtros": [{"tipo": "grupo", "nombre": "42k MTY", "otros": ["Berlin"]}]}, 1
+    )
+    assert api.calls[-1][1]["filters"] == [{"type": "group", "name": "42k MTY", "also": ["Berlin"]}]
+    bad = await Toolbox(api).run("cifras", {"metricas": ["personas"], "filtros": [{"tipo": "grupo", "nombre": "MTY", "otros": ["x"]}]}, 1)
+    assert bad.is_error

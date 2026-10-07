@@ -21,7 +21,7 @@ from duma.confirmations import Confirmations
 from duma.preferences import Preferences
 from duma.sessions import SessionStore
 from duma.telegram_api import Telegram, TelegramError
-from duma.tools import OutFile, Toolbox
+from duma.tools import OutFile, Toolbox, parse_choice
 from duma.usage import PRICES, Usage, cost_usd
 
 log = logging.getLogger("duma")
@@ -94,7 +94,11 @@ def _command(text: str) -> Optional[str]:
 def _keyboard(buttons: Optional[list[tuple[str, str]]]) -> Optional[dict[str, Any]]:
     if not buttons:
         return None
-    return {"inline_keyboard": [[{"text": label, "callback_data": data} for label, data in buttons]]}
+    cells = [{"text": label, "callback_data": data} for label, data in buttons]
+    # Guardar/Cancelar sit side by side; the options of a question go one under another, so their text fits.
+    if any(parse_choice(data) for _, data in buttons):
+        return {"inline_keyboard": [[cell] for cell in cells]}
+    return {"inline_keyboard": [cells]}
 
 
 def _arguments(text: str) -> str:
@@ -344,6 +348,10 @@ class Bot:
 
     async def _on_button(self, query: dict[str, Any]) -> None:
         """A click on Guardar/Cancelar. This, and nothing the model says, is what runs an action."""
+        choice = parse_choice(query.get("data", ""))
+        if choice is not None:
+            await self._on_choice(query, *choice)
+            return
         parsed = confirmations.parse(query.get("data", ""))
         if parsed is None or self._confirmations is None:
             await self._tg.answer_callback_query(query["id"])
@@ -371,6 +379,33 @@ class Bot:
             await self._tg.edit_message_text(shown["chat"]["id"], shown["message_id"], f"{pending.summary}\n\n{outcome}")
         except TelegramError as exc:
             log.info("could not rewrite a decided proposal: %s", exc)
+
+    async def _on_choice(self, query: dict[str, Any], asked: int, index: int) -> None:
+        """A click on an option of a question: the same as the admin typing that option in that topic."""
+        user_id = query["from"]["id"]
+        if user_id != asked:
+            await self._tg.answer_callback_query(query["id"], NOT_YOURS)
+            return
+        shown = query.get("message") or {}
+        rows = (shown.get("reply_markup") or {}).get("inline_keyboard") or []
+        label = next(
+            (cell.get("text") for row in rows for cell in row if cell.get("callback_data") == query.get("data")), None
+        )
+        await self._tg.answer_callback_query(query["id"])
+        if not label or not shown.get("message_id"):
+            return  # the buttons are already gone: a second click on a question that was answered
+        chat_id = shown["chat"]["id"]
+        try:
+            # Rewritten without a keyboard: the choice stays in the chat and cannot be clicked twice.
+            await self._tg.edit_message_text(chat_id, shown["message_id"], f"{shown.get('text', '')}\n\n→ {label}".strip())
+        except TelegramError as exc:
+            log.info("could not rewrite an answered question: %s", exc)
+        thread_id = shown.get("message_thread_id") if shown.get("is_topic_message") else None
+        if thread_id == GENERAL_TOPIC:
+            thread_id = None
+        if await self._over_budget(chat_id, thread_id):
+            return
+        await self._ask(chat_id, user_id, thread_id, label)
 
     def _execute(self, kind: str, payload: dict[str, Any], user_id: int) -> str:
         """Run a confirmed action and say what happened. Every kind of action with an effect is listed here."""

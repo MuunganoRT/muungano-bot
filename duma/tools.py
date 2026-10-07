@@ -3,10 +3,10 @@
 Two kinds. "Direct" tools (`buscar_atleta`, `resumen_atleta`, `buscar_atletas`,
 `grafica`) send what they find to the chat as text, a file built by `render` or
 a chart drawn by `charts`, and the model gets back only a short acknowledgement
-with no names in it. `cifras` and
-`consultar` answer the model: the first with totals, which identify nobody,
-and the second with one row per person where the name is a code. Either way
-the model never reads a name it was not given by the admin.
+with no names in it. `cifras`, `catalogo` and `consultar` answer the model:
+with totals, which identify nobody; with the names of groups and events; and
+with one row per person where the name is a code. Either way the model never
+reads a person's name it was not given by the admin.
 """
 
 from __future__ import annotations
@@ -60,6 +60,15 @@ FILTERS_SCHEMA: dict[str, Any] = {
             "nombre": {
                 "type": "string",
                 "description": "Para `evento` y `grupo`: parte del nombre, mínimo 2 letras.",
+            },
+            "otros": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 10,
+                "description": (
+                    "Solo `grupo`: más nombres de grupo, para juntar varios en un mismo conjunto («los de MTY y los de "
+                    "Berlin»). Dos filtros `grupo` separados no sirven: nadie está en dos grupos."
+                ),
             },
             "condicion": {
                 "type": "string",
@@ -204,6 +213,42 @@ SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "catalogo",
+        "description": (
+            "Te devuelve, solo a ti, los nombres reales de todos los grupos (con cuántos miembros tiene cada uno) y de "
+            "los eventos más recientes (con su fecha). Nada sale al chat y no trae datos de nadie. Úsala ANTES de "
+            "filtrar por un grupo o un evento cuyo nombre exacto no hayas visto ya en esta conversación, para saber a "
+            "cuál o cuáles se refiere el administrador. Los filtros comparan letras: «maratón» no encuentra «42k MTY "
+            "3:45+»."
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "preguntar",
+        "description": (
+            "Hace una pregunta al administrador con un botón por opción, para que conteste con un toque en vez de "
+            "escribir. Úsala siempre que tengas que preguntar entre opciones concretas (cuál grupo, cuál evento, cuál "
+            "periodo, cuál métrica). Cada opción es el texto del botón: corto y que se entienda solo, con el nombre "
+            "real («42k MTY, los 5 grupos», «Berlin 4:00hr»). Incluye «Todos» si aplica. Después de llamarla no hagas "
+            "nada más en este turno: la opción elegida te llega como el siguiente mensaje del administrador. Para "
+            "una pregunta abierta, sin opciones, escríbela como texto."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pregunta": {"type": "string", "description": "La pregunta, en una línea."},
+                "opciones": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 2,
+                    "maxItems": 8,
+                    "description": "De 2 a 8 opciones, de hasta 40 caracteres cada una.",
+                },
+            },
+            "required": ["pregunta", "opciones"],
+        },
+    },
+    {
         "name": "grafica",
         "description": (
             "Muestra en el chat una gráfica. Tres tipos. `semanal` (por defecto): por semana, de lunes a domingo, "
@@ -320,6 +365,24 @@ ANALYZE_CONCURRENCY = 5
 TZ = ZoneInfo("America/Monterrey")
 CHART_DEFAULT_WEEKS = 8
 CHART_KINDS = ("semanal", "ranking", "dispersion")
+# A choice button's callback data: `q:<who may answer>:<option number>`. The option's text is read back from
+# the message's own keyboard when it is clicked, so nothing has to be stored.
+CHOICE = "q"
+MAX_CHOICES = 8
+CHOICE_LABEL_MAX = 40
+
+
+def choice_buttons(labels: list[str], telegram_user_id: int) -> list[tuple[str, str]]:
+    return [(label, f"{CHOICE}:{telegram_user_id}:{i}") for i, label in enumerate(labels)]
+
+
+def parse_choice(data: str) -> Optional[tuple[int, int]]:
+    """`q:<user>:<n>` -> (user, n); None for anything else."""
+    kind, _, rest = (data or "").partition(":")
+    user, _, index = rest.partition(":")
+    if kind != CHOICE or not user.isascii() or not user.isdigit() or not index.isascii() or not index.isdigit():
+        return None
+    return int(user), int(index)
 
 
 def _integer(args: dict[str, Any], key: str, minimum: int, maximum: int) -> int:
@@ -352,7 +415,13 @@ def _filter(raw: Any) -> dict[str, Any]:
             out["year"] = _integer(raw, "anio", 2000, 2100)
         return out
     if kind == "grupo":
-        return {"type": "group", "name": _text(raw, "nombre")}
+        out = {"type": "group", "name": _text(raw, "nombre")}
+        others = raw.get("otros") or []
+        if not isinstance(others, list) or len(others) > 10:
+            raise ValueError("`otros` must be a list of at most 10 group names")
+        if others:
+            out["also"] = [_text({"otros": other}, "otros") for other in others]
+        return out
     if kind == "pago":
         return {"type": "paid", **_window(raw)}
     if kind == "entrenos":
@@ -416,6 +485,12 @@ def _row(code: str, person: dict[str, Any], summary: Optional[dict[str, Any]]) -
     return " | ".join(parts)
 
 
+def _candidate_label(athlete: dict[str, Any]) -> str:
+    group = athlete.get("group")
+    label = f"{athlete['name']} · {group}" if group else athlete["name"]
+    return label if len(label) <= 60 else label[:59].rstrip() + "…"
+
+
 def _week_figures(week: dict[str, Any]) -> str:
     score = "sin score" if week["score_avg"] is None else f"score {week['score_avg']}"
     return f"{week['week_start']}: {week['done']}/{week['prescribed']} entrenos, {week['distance_km']} km, {score}"
@@ -473,6 +548,8 @@ class Toolbox:
             "resumen_atleta": self._summary,
             "buscar_atletas": self._query,
             "cifras": self._aggregate,
+            "catalogo": self._catalog,
+            "preguntar": self._ask,
             "grafica": lambda a, u: self._chart(a, u, names),
             "consultar": lambda a, u: self._analyze(a, u, names),
         }
@@ -558,6 +635,30 @@ class Toolbox:
             buttons=confirmations.buttons(action_id, "Guardar"),
         )
 
+    async def _ask(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        question = _text(args, "pregunta", minimum=3, maximum=300)
+        options = args.get("opciones")
+        if not isinstance(options, list) or not 2 <= len(options) <= MAX_CHOICES:
+            raise ValueError(f"`opciones` must be a list of 2 to {MAX_CHOICES} texts")
+        labels = []
+        for option in options:
+            if not isinstance(option, str) or not 1 <= len(option.strip()) <= CHOICE_LABEL_MAX:
+                raise ValueError(f"each option must be text of 1 to {CHOICE_LABEL_MAX} characters")
+            labels.append(option.strip())
+        if len(set(labels)) != len(labels):
+            raise ValueError("two options say the same")
+        return ToolResult(
+            question,
+            "Pregunta enviada con botones. No hagas nada más en este turno: la respuesta llega como su siguiente mensaje.",
+            buttons=choice_buttons(labels, telegram_user_id),
+        )
+
+    async def _catalog(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        found = await self._api.get("/assistant/catalog", telegram_user_id=telegram_user_id)
+        groups = "; ".join(f"{g['name']} ({g['members']})" for g in found["groups"]) or "ninguno"
+        events = "; ".join(f"{e['name']} ({e['date']})" for e in found["events"]) or "ninguno"
+        return ToolResult(None, f"Grupos (miembros): {groups}.\nEventos (fecha): {events}.")
+
     async def _aggregate(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
         wanted = args.get("metricas")
         if not isinstance(wanted, list) or not wanted or any(m not in METRICS for m in wanted):
@@ -625,9 +726,13 @@ class Toolbox:
         if not candidates:
             return ToolResult("No encontré a nadie con ese nombre.", "Sin resultados; ya se lo dije al administrador.")
         if len(candidates) > 1:
+            labels = [_candidate_label(a) for a in candidates]
+            # Buttons only when each one says something different: two people with the same name and group need typing.
+            unique = len(candidates) <= MAX_CHOICES and len(set(labels)) == len(labels)
             return ToolResult(
                 render_candidates(candidates, len(candidates), question=True),
                 f"Hay {len(candidates)} candidatos; ya le pregunté al administrador cuál. Espera su respuesta.",
+                buttons=choice_buttons(labels, telegram_user_id) if unique else None,
             )
         return candidates[0]["id"]
 

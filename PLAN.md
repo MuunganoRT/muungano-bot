@@ -37,6 +37,22 @@ del API (PR de Alex); el bot, en `main`. El deploy instala `matplotlib` solo.
 **Ranking y dispersión subidos el 2026-10-06:** el API en `dev` (`7230573`) y en `main` (PR de Alex); el bot, en
 `main`. La ruta de series acepta `per_athlete` y cada semana trae `scored`, `score_min`, `score_median` y `score_max`.
 
+**Subido el 2026-10-06, "asegúrate antes de responder"** (API en `dev` `f7bc3f9` y en `main` por PR de Alex; bot
+en `main`; falta verlo en el grupo)**:** Alex pidió que Duma no adivine: que
+haga las consultas previas que necesite y, si queda duda, pregunte. Es regla general del agente, no solo de grupos.
+- `muungano-api` (`dev`): `GET /assistant/catalog` (grupos con número de miembros, eventos recientes con fecha) y,
+  cuando un grupo o evento no coincide, la nota trae los nombres que sí existen. **Va primero.**
+- `muungano-bot` (`main`): herramienta `catalogo` (solo la lee el modelo), su ruta en `duma/api_client.py` y la
+  sección "Antes de responder, asegúrate" de `prompts/system.md`.
+- Preguntas con botones: herramienta `preguntar` (2 a 8 opciones). Tocar un botón equivale a escribir esa opción
+  en el tema (`Bot._on_choice` en `duma/main.py`); solo puede contestar quien preguntó. Los candidatos de un nombre
+  ambiguo también salen con botones. No guarda nada: el texto de la opción se lee del teclado del propio mensaje.
+- El filtro de grupo acepta varios nombres (`also` en el API, `otros` en el bot), para "los de MTY y los de Berlin".
+- Probado con el modelo real contra el API local: "los de maratón" consulta el catálogo y pregunta entre MTY,
+  Chicago y Berlin; un nombre parcial que solo encaja con un grupo lo usa y dice cuál tomó.
+- Los grupos reales no se llaman "Maratón": son "42k MTY 3:45+", "42km Chicago 4:00", "Berlin 4:00hr",
+  "Off Season - …". "Maratón" es un grupo de los datos de prueba.
+
 **Lo siguiente, en orden:**
 1. Probar las tres gráficas en el grupo (se probaron contra el API local, con las imágenes revisadas; ninguna se
    ha visto en Telegram).

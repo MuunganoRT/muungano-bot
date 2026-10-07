@@ -945,3 +945,52 @@ async def test_while_the_speech_model_downloads_a_voice_note_is_told_to_wait(set
     await bot._preparing
     await bot.handle(msg(**VOICE))
     assert agent.calls == [("¿cuántos inactivos hay?", 10)]
+
+
+def choose(index, user=10, asked=10, thread=7):
+    labels = ["42k MTY, los 5 grupos", "Berlin 4:00hr"]
+    return {
+        "update_id": 3,
+        "callback_query": {
+            "id": "cq2",
+            "from": {"id": user},
+            "data": f"q:{asked}:{index}",
+            "message": {
+                "message_id": 901,
+                "chat": {"id": ADMIN, "type": "supergroup"},
+                "text": "¿Cuál grupo?",
+                "message_thread_id": thread,
+                "is_topic_message": True,
+                "reply_markup": {
+                    "inline_keyboard": [[{"text": label, "callback_data": f"q:{asked}:{i}"}] for i, label in enumerate(labels)]
+                },
+            },
+        },
+    }
+
+
+async def test_clicking_an_option_is_the_same_as_typing_it_in_that_topic(settings, tmp_path):
+    agent = FakeAgent()
+    bot, tg, _ = make(settings, tmp_path, agent)
+    await bot.handle(choose(1))
+    assert agent.calls == [("Berlin 4:00hr", 10)]
+    # The question keeps the choice and loses its buttons, so it cannot be answered twice.
+    assert tg.edits == [(901, "¿Cuál grupo?\n\n→ Berlin 4:00hr")]
+    assert tg.sent and all(thread == 7 for _, _, thread in tg.sent)
+
+
+async def test_only_who_was_asked_can_answer_and_a_stale_button_does_nothing(settings, tmp_path):
+    agent = FakeAgent()
+    bot, tg, _ = make(settings, tmp_path, agent)
+    await bot.handle(choose(0, user=20))  # another allowed admin
+    assert tg.popups == [main_module.NOT_YOURS] and agent.calls == [] and tg.edits == []
+    await bot.handle(choose(5))  # an option that is not on the message
+    assert agent.calls == [] and tg.edits == []
+
+
+def test_the_options_of_a_question_go_one_per_row_and_a_confirmation_side_by_side():
+    from duma.tools import choice_buttons
+
+    rows = main_module._keyboard(choice_buttons(["Uno", "Dos", "Tres"], 10))["inline_keyboard"]
+    assert [len(row) for row in rows] == [1, 1, 1] and rows[2][0] == {"text": "Tres", "callback_data": "q:10:2"}
+    assert [len(row) for row in main_module._keyboard([("Guardar", "ok:a"), ("Cancelar", "no:a")])["inline_keyboard"]] == [2]
