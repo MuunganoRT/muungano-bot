@@ -147,14 +147,14 @@ async def test_a_tool_file_goes_to_the_chat_with_its_caption_and_never_to_the_mo
     from duma.tools import OutFile
 
     llm = ScriptedLLM(reply([tool_use("tu_1", "buscar_atletas")], stop="tool_use"), reply([text("Listo.")]))
-    box = FakeBox(ToolResult("51 personas.", "51 resultado(s); mandé el archivo.", file=OutFile("atletas.csv", b"Nombre\nAna")))
+    box = FakeBox(ToolResult("51 personas.", "51 resultado(s); mandé el archivo.", files=[OutFile("atletas.csv", b"Nombre\nAna")]))
     sent = []
 
-    async def send(t, file=None, buttons=None):
-        sent.append((t, file))
+    async def send(t, files=None, buttons=None):
+        sent.append((t, files))
 
     await make(settings, llm, box).run(Session(), "todos", 10, send)
-    assert sent == [("51 personas.", box.result.file)]
+    assert sent == [("51 personas.", box.result.files)]
     assert "Ana" not in str(llm.calls[1]["messages"][2])
 
 
@@ -199,7 +199,7 @@ async def test_a_proposal_reaches_the_chat_with_its_buttons(settings):
     box = FakeBox(ToolResult("Regla: «x»", "Aún no está guardada.", buttons=[("Guardar", "ok:abc"), ("Cancelar", "no:abc")]))
     sent = []
 
-    async def send(t, file=None, buttons=None):
+    async def send(t, files=None, buttons=None):
         sent.append((t, buttons))
 
     await make(settings, llm, box).run(Session(), "siempre así", 10, send)

@@ -243,20 +243,20 @@ async def test_the_model_hears_what_did_not_match_and_what_was_left_out():
     r = await Toolbox(api).run("buscar_atletas", {"filtros": [{"tipo": "evento", "nombre": "bostn"}]}, 1)
     assert "solo trae 1" in r.to_model and "No event matches 'bostn'" in r.to_model
     assert r.direct_text == "800 personas. El archivo trae las primeras 1; acota los filtros para ver al resto."
-    assert r.file is not None
+    assert r.files
 
 
 async def test_a_long_list_goes_as_a_csv_file_and_a_short_one_as_text():
     people = [{"id": i, "name": f"Persona {i:02d}", "group": "Maratón", "active": True} for i in range(51)]
     long = await Toolbox(FakeApi(people)).run("buscar_atletas", {}, 1)
     assert long.direct_text == "51 personas. Va la lista completa en el archivo."
-    assert long.file.name == "atletas.csv"
-    rows = long.file.content.decode("utf-8-sig").splitlines()
+    assert long.files[0].name == "atletas.csv"
+    rows = long.files[0].content.decode("utf-8-sig").splitlines()
     assert rows[0] == "Nombre,Rol,Grupo,Estado" and len(rows) == 52 and rows[1] == "Persona 00,,Maratón,activo"
     assert "Persona" not in long.to_model and "CSV" in long.to_model
 
     short = await Toolbox(FakeApi(people[:50])).run("buscar_atletas", {}, 1)
-    assert short.file is None and short.direct_text.startswith("50 personas:")
+    assert not short.files and short.direct_text.startswith("50 personas:")
 
 
 async def test_a_malformed_filter_never_reaches_the_api():
@@ -309,7 +309,7 @@ async def test_figures_go_to_the_model_as_numbers_and_nothing_goes_to_the_chat()
         "metrics": ["athletes", "payments", "workouts", "distance_km", "score_avg"],
         "period": {"from": "2026-09-01", "to": "2026-09-30"},
     }
-    assert r.direct_text is None and r.file is None and not r.is_error
+    assert r.direct_text is None and not r.files and not r.is_error
     assert r.to_model == (
         "Personas: 23. Periodo: 2026-09-01 a 2026-09-30. "
         "Pagos aprobados: 12, suman $14,400.00 MXN (2 sin monto capturado, no suman). "
@@ -416,7 +416,7 @@ async def test_analysis_rows_reach_the_model_with_codes_and_never_a_name():
     luis = {"id": 12, "name": "Luis Coach", "role": "coach", "group": None, "active": False}
     api, names = FakeApi([ana, luis]), Pseudonyms()
     r = await Toolbox(api).run("consultar", {"filtros": [{"tipo": "evento", "nombre": "chicago"}]}, 956, names)
-    assert r.direct_text is None and r.file is None and not r.is_error
+    assert r.direct_text is None and not r.files and not r.is_error
     assert r.to_model.splitlines() == [
         "2 persona(s).",
         "ATLETA_01 | runner | grupo Maratón | activo | evento 42k Chicago (2025-10-12) tiempo 3:36:00 | último pago 2026-10-03 $1,200.00",
@@ -469,7 +469,7 @@ async def test_a_chart_of_one_athlete_goes_to_the_chat_as_a_picture_and_the_mode
     path, body, user = api.calls[-1]
     assert path == "/assistant/athletes/series" and user == 956
     assert body == {"period": {"from": "2026-09-07", "to": "2026-09-20"}, "athlete_id": 10}
-    assert r.file.name == "entrenos.png" and r.file.photo and r.file.content.startswith(PNG)
+    assert r.files[0].name == "entrenos.png" and r.files[0].photo and r.files[0].content.startswith(PNG)
     assert r.to_model == "Gráfica de entrenos enviada al chat: 2 semanas, del 2026-09-07 al 2026-09-20."
     assert "Ana" not in r.to_model and "38.2" not in r.to_model
 
@@ -488,7 +488,7 @@ async def test_a_chart_of_a_set_tells_the_model_the_weekly_totals():
         "filters": [{"type": "group", "name": "maraton"}],
         "member_status": "active",
     }
-    assert r.file.photo and r.file.content.startswith(PNG)
+    assert r.files[0].photo and r.files[0].content.startswith(PNG)
     assert "2026-09-07: 4/5 entrenos, 38.2 km, score 71.0" in r.to_model
     assert "2026-09-14: 0/0 entrenos, 0.0 km, sin score" in r.to_model and "Grupos: Maratón." in r.to_model
 
@@ -505,7 +505,7 @@ async def test_a_chart_without_dates_covers_the_last_eight_weeks():
 async def test_a_chart_asks_which_one_when_the_name_is_ambiguous_and_draws_nothing():
     api = FakeApi([ANA_P, ANA_R])
     r = await Toolbox(api).run("grafica", {"metrica": "km", "nombre": "ana"}, 1)
-    assert r.file is None and "Ana Ruiz" in r.direct_text and "candidatos" in r.to_model
+    assert not r.files and "Ana Ruiz" in r.direct_text and "candidatos" in r.to_model
     assert all(not path.endswith("/series") for path, _, _ in api.calls)
 
 
@@ -513,7 +513,7 @@ async def test_a_chart_with_nothing_to_draw_says_so_instead_of_an_empty_picture(
     api = FakeApi([ANA_P])
     api.weeks = [{"week_start": "2026-09-07", "prescribed": 0, "done": 0, "distance_km": 0.0, "score_avg": None}]
     r = await Toolbox(api).run("grafica", {"metrica": "entrenos", "nombre": "ana"}, 1)
-    assert r.file is None and r.direct_text == "No hay nada que graficar de Ana Peña en ese periodo."
+    assert not r.files and r.direct_text == "No hay nada que graficar de Ana Peña en ese periodo."
 
 
 async def test_a_chart_refuses_a_bad_request_before_calling_the_api():
@@ -536,7 +536,7 @@ async def test_a_ranking_asks_for_the_breakdown_and_keeps_names_and_figures_in_t
     api = FakeApi([])
     r = await Toolbox(api).run("grafica", {"metrica": "score", "tipo": "ranking", "filtros": GROUP, **SEPTEMBER}, 1)
     assert api.calls[-1][1]["per_athlete"] is True
-    assert r.file.name == "ranking_score.png" and r.file.photo and r.file.content.startswith(PNG)
+    assert r.files[0].name == "ranking_score.png" and r.files[0].photo and r.files[0].content.startswith(PNG)
     # Beto had nothing prescribed: he is not ranked last with a zero he did not earn.
     assert "2 personas con entrenos prescritos, se muestran todas" in r.to_model
     assert "Ana" not in r.to_model and "71" not in r.to_model
@@ -546,7 +546,7 @@ async def test_a_spread_chart_tells_the_model_the_weekly_range_and_asks_for_no_b
     api = FakeApi([])
     r = await Toolbox(api).run("grafica", {"metrica": "score", "tipo": "dispersion", "filtros": GROUP, **SEPTEMBER}, 1)
     assert "per_athlete" not in api.calls[-1][1]
-    assert r.file.name == "dispersion_score.png" and r.file.content.startswith(PNG)
+    assert r.files[0].name == "dispersion_score.png" and r.files[0].content.startswith(PNG)
     assert "2026-09-07: 3 personas, 20.0 / 71.0 / 96.0" in r.to_model and "2026-09-14: nadie" in r.to_model
 
 
@@ -554,7 +554,7 @@ async def test_a_ranking_of_people_with_nothing_prescribed_draws_nothing():
     api = FakeApi([])
     api.people = [FakeApi.people[2]]
     r = await Toolbox(api).run("grafica", {"metrica": "km", "tipo": "ranking", "filtros": GROUP}, 1)
-    assert r.file is None and r.direct_text.startswith("No hay nada que graficar")
+    assert not r.files and r.direct_text.startswith("No hay nada que graficar")
 
 
 async def test_ranking_and_spread_refuse_what_they_cannot_draw_before_calling_the_api():
@@ -573,7 +573,7 @@ async def test_the_catalogue_goes_to_the_model_only_with_names_and_head_counts()
     api = FakeApi([])
     r = await Toolbox(api).run("catalogo", {}, 956)
     assert api.calls[-1] == ("/assistant/catalog", None, 956)
-    assert r.direct_text is None and r.file is None and not r.is_error
+    assert r.direct_text is None and not r.files and not r.is_error
     assert r.to_model == (
         "Grupos (miembros): 42k MTY 3:45+ (7); Berlin 4:00hr (4).\nEventos (fecha): Maratón de Chicago (2026-10-11)."
     )
@@ -622,6 +622,64 @@ async def test_a_group_filter_can_join_several_groups():
 
 PNG = b"\x89PNG"
 TABLE_NOTE = "La tabla ya salió al chat como imagen: no repitas sus cifras; comenta en dos o tres líneas lo que importa."
+CSV_NOTE = "La lista ya salió al chat como archivo CSV: no repitas sus cifras; comenta en dos o tres líneas lo que importa."
+
+
+def _many_laps(count):
+    return {**FakeApi.laps, "total": count, "laps": [{**FakeApi.laps["laps"][0], "lap": n} for n in range(1, count + 1)]}
+
+
+async def test_a_table_that_fits_one_picture_stays_a_picture_and_a_longer_one_becomes_a_csv():
+    api = FakeApi([ANA_P])
+    args = {"nombre": "ana pena", "entreno": 2}
+    api.laps = _many_laps(40)
+    r = await Toolbox(api).run("vueltas_entreno", args, 956)
+    assert [f.name for f in r.files] == ["vueltas.png"] and r.to_model.endswith(TABLE_NOTE)
+
+    api.laps = _many_laps(41)
+    r = await Toolbox(api).run("vueltas_entreno", args, 956)
+    assert [(f.name, f.photo) for f in r.files] == [("vueltas.csv", False)]
+    assert r.direct_text.endswith("41 vueltas del 20 sep 2026.") and r.to_model.endswith(CSV_NOTE)
+    assert "vuelta 41 |" in r.to_model and "Ana" not in r.to_model
+    lines = r.files[0].content.decode("utf-8-sig").splitlines()
+    assert lines[0] == "Vuelta,Distancia (m),Tiempo,Ritmo (min/km),FC (lpm),Score (%)"
+    assert lines[1] == "1,31000,2:35:30,5:01,172,98" and len(lines) == 42
+
+
+async def test_asked_for_as_pictures_a_long_table_is_split_evenly_into_an_album():
+    api = FakeApi([ANA_P])
+    for count, sizes in ((41, 2), (80, 2), (81, 3), (120, 3)):
+        api.laps = _many_laps(count)
+        r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2, "formato": "imagen"}, 956)
+        assert [f.name for f in r.files] == [f"vueltas_{n}.png" for n in range(1, sizes + 1)], count
+        assert all(f.photo and f.content.startswith(PNG) for f in r.files) and r.direct_text == ""
+        assert r.to_model.endswith(f"La tabla ya salió al chat en {sizes} imágenes: no repitas sus cifras; comenta en dos o tres líneas lo que importa.")
+
+    from duma.tools import _pages
+
+    assert [len(page) for page in _pages(list(range(60)))] == [30, 30]
+    assert [len(page) for page in _pages(list(range(81)))] == [27, 27, 27]
+    assert [len(page) for page in _pages(list(range(7)))] == [7]
+
+
+async def test_a_csv_can_be_asked_for_and_a_format_that_does_not_exist_is_an_error():
+    api = FakeApi([ANA_P])
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana pena", "formato": "csv"}, 956)
+    assert [f.name for f in r.files] == ["entrenos.csv"] and r.to_model.endswith(CSV_NOTE)
+    assert r.direct_text.startswith("Ana Peña: 2 entrenos, ")
+    lines = r.files[0].content.decode("utf-8-sig").splitlines()
+    assert lines[0] == "Fecha,Tipo,Km,Tiempo,Ritmo (min/km),FC (lpm),Score (%),Vueltas"
+    assert lines[2] == "2026-09-20,Quality Session,32.1,2:41:30,5:02,,98,2"
+
+    api.workouts = {**FakeApi.workouts, "workouts": [FakeApi.workouts["workouts"][0]] * 60}
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana pena"}, 956)
+    assert [f.name for f in r.files] == ["entrenos.csv"]
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana pena", "formato": "imagen"}, 956)
+    assert [f.name for f in r.files] == ["entrenos_1.png", "entrenos_2.png"]
+
+    api.calls.clear()
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana pena", "formato": "pdf"}, 956)
+    assert r.is_error and api.calls == []
 
 
 async def test_one_athletes_workouts_go_to_the_chat_as_a_picture_and_to_the_model_as_figures():
@@ -629,7 +687,7 @@ async def test_one_athletes_workouts_go_to_the_chat_as_a_picture_and_to_the_mode
     args = {"nombre": "ana pena", "ciclo": True, "km_min": 30, "km_max": 34}
     r = await Toolbox(api).run("entrenos_atleta", args, 956)
     assert r.direct_text == "" and not r.is_error
-    assert r.file.photo and r.file.name == "entrenos.png" and r.file.content.startswith(PNG)
+    assert r.files[0].photo and r.files[0].name == "entrenos.png" and r.files[0].content.startswith(PNG)
     assert r.to_model.splitlines() == [
         "2 entreno(s) hechos del 2026-09-01 al 2026-09-30. El número tras # es el que pide `vueltas_entreno`.",
         "#1 | 2026-09-10 | Easy Run | 10.0 km | 0:55:00 | 5:30 min/km | FC 150 lpm | score 95.0%",
@@ -669,7 +727,7 @@ async def test_the_laps_of_one_workout():
     api = FakeApi([ANA_P])
     r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2}, 956)
     assert r.direct_text == "" and not r.is_error
-    assert r.file.photo and r.file.name == "vueltas.png" and r.file.content.startswith(PNG)
+    assert r.files[0].photo and r.files[0].name == "vueltas.png" and r.files[0].content.startswith(PNG)
     assert r.to_model.splitlines() == [
         "Entreno #2 del 2026-09-20: 2 vuelta(s).",
         "vuelta 1 | 31000 m | 2:35:30 | 5:01 min/km | FC 172 lpm | score 98.0%",
@@ -680,13 +738,8 @@ async def test_the_laps_of_one_workout():
     # An API that does not send the name or the totals yet still gets its table.
     api.laps = {k: v for k, v in FakeApi.laps.items() if k not in ("athlete", "workout")}
     r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2}, 956)
-    assert r.file.content.startswith(PNG)
+    assert r.files[0].content.startswith(PNG)
 
-    many = [{**FakeApi.laps["laps"][0], "lap": n} for n in range(1, 43)]
-    api.laps = {**FakeApi.laps, "total": 42, "laps": many}
-    r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2}, 956)
-    assert r.file is None and r.direct_text is None and "demasiadas vueltas" in r.to_model
-    api.laps = FakeApi.laps
     assert api.calls[-1][0] == "/assistant/athletes/10/workouts/2/laps"
 
     api.laps = {**FakeApi.laps, "total": 0, "laps": []}

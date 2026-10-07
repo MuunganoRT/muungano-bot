@@ -37,7 +37,7 @@ from duma.usage import Usage
 
 log = logging.getLogger(__name__)
 
-# Called as send(text) or, when a tool attached something, send(text, file=..., buttons=...).
+# Called as send(text) or, when a tool attached something, send(text, files=..., buttons=...).
 Send = Callable[..., Awaitable[None]]
 
 TRY_AGAIN = "No pude con eso ahorita. Intenta de nuevo en un momento."
@@ -287,8 +287,8 @@ class Agent:
                         result = await self._tools.run(block.name, dict(block.input), telegram_user_id, session.names)
                         if self._audit:
                             self._audit.log("tool", user=telegram_user_id, tool=block.name, args=dict(block.input), error=result.is_error)
-                        if result.file or result.buttons:
-                            await send(result.direct_text or "", file=result.file, buttons=result.buttons)
+                        if result.files or result.buttons:
+                            await send(result.direct_text or "", files=result.files, buttons=result.buttons)
                         elif result.direct_text:
                             await send(result.direct_text)
                         item: dict[str, Any] = {"type": "tool_result", "tool_use_id": block.id, "content": result.to_model}

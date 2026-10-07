@@ -8,6 +8,7 @@ token in the log; `main.setup_logging` raises that logger's level.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Optional
 
 import httpx
@@ -16,6 +17,8 @@ import httpx
 MAX_MESSAGE = 4000
 # A file's caption is capped at 1024; a longer text goes as its own message first.
 MAX_CAPTION = 1000
+# What Telegram takes in one album.
+MAX_ALBUM = 10
 
 
 class TelegramError(Exception):
@@ -134,6 +137,28 @@ class Telegram:
         if thread_id:
             params["message_thread_id"] = thread_id
         await self._call("sendPhoto", params, files={"photo": (filename, content, "image/png")})
+
+    async def send_photos(
+        self,
+        chat_id: int,
+        photos: list[tuple[str, bytes]],
+        caption: str = "",
+        thread_id: Optional[int] = None,
+    ) -> None:
+        """Several pictures as one album, in order. More than an album holds go as consecutive albums."""
+        for start in range(0, len(photos), MAX_ALBUM):
+            batch = photos[start : start + MAX_ALBUM]
+            if len(batch) == 1:  # an album needs two
+                await self.send_photo(chat_id, batch[0][0], batch[0][1], caption if start == 0 else "", thread_id)
+                continue
+            media: list[dict[str, Any]] = [{"type": "photo", "media": f"attach://photo{i}"} for i in range(len(batch))]
+            if caption and start == 0:
+                media[0]["caption"] = caption[:MAX_CAPTION]
+            params: dict[str, Any] = {"chat_id": chat_id, "media": json.dumps(media)}
+            if thread_id:
+                params["message_thread_id"] = thread_id
+            files = {f"photo{i}": (name, content, "image/png") for i, (name, content) in enumerate(batch)}
+            await self._call("sendMediaGroup", params, files=files)
 
     async def download(self, file_id: str) -> bytes:
         """The bytes of a file an admin sent. Telegram serves files of up to 20 MB to bots."""

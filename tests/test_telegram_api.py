@@ -176,3 +176,20 @@ async def test_a_failed_download_never_carries_the_url():
     with pytest.raises(TelegramError) as caught:
         await make(handler).download("abc")
     assert TOKEN not in str(caught.value) and "404" in str(caught.value)
+
+
+async def test_send_photos_uploads_an_album_and_splits_what_one_album_cannot_hold():
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, request.content))
+        return httpx.Response(200, json={"ok": True, "result": []})
+
+    photos = [(f"t_{n}.png", b"\x89PNG") for n in range(1, 12)]
+    await make(handler).send_photos(-100, photos, "Ana", thread_id=7)
+    (first, body), (second, rest) = seen
+    assert first.endswith("/sendMediaGroup") and b'name="photo9"; filename="t_10.png"' in body
+    assert b'"media": "attach://photo0", "caption": "Ana"' in body and b'name="message_thread_id"' in body
+    assert b"photo10" not in body
+    # The eleventh is alone, and an album needs two.
+    assert second.endswith("/sendPhoto") and b'filename="t_11.png"' in rest and b'name="caption"' not in rest

@@ -149,6 +149,16 @@ def _cell(value: Any) -> str:
     return "'" + text if text[:1] in ("=", "+", "-", "@") else text
 
 
+def table_csv(header: list[str], rows: list[list[Any]]) -> bytes:
+    out = io.StringIO()
+    writer = csv.writer(out)
+    writer.writerow(header)
+    for row in rows:
+        writer.writerow([_cell(v) for v in row])
+    # The BOM is what makes Excel read the accents as UTF-8.
+    return out.getvalue().encode("utf-8-sig")
+
+
 def matches_csv(found: dict[str, Any]) -> bytes:
     """The same list as `render_matches`, one member per row, for a spreadsheet."""
     athletes = found["athletes"]

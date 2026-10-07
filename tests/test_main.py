@@ -12,6 +12,7 @@ class FakeTelegram:
         self.sent, self.actions, self.left, self.created, self.forwarded = [], [], [], [], []
         self.documents, self.keyboards, self.popups, self.edits = [], [], [], []
         self.photos = []
+        self.albums = []
         self.closed, self.undeletable = [], set()
         self.files = {"voz1": b"OggS fake", "csv1": "Nombre,Grupo\nAna,Maratón\n".encode(), "png1": b"\x89PNG fake"}
         self.attempts, self._topics, self._next = 0, topics, 500
@@ -46,6 +47,9 @@ class FakeTelegram:
 
     async def send_photo(self, chat_id, filename, content, caption="", thread_id=None):
         self.photos.append((chat_id, filename, content, caption, thread_id))
+
+    async def send_photos(self, chat_id, photos, caption="", thread_id=None):
+        self.albums.append((chat_id, photos, caption, thread_id))
 
     async def send_chat_action(self, chat_id, thread_id=None, action="typing"):
         self.actions.append((chat_id, thread_id))
@@ -455,7 +459,7 @@ async def test_a_file_from_a_tool_is_uploaded_to_the_topic_where_it_was_asked(se
 
     class Filer(FakeAgent):
         async def run(self, session, text, user, send):
-            await send("51 personas.", OutFile("atletas.csv", b"Nombre"))
+            await send("51 personas.", [OutFile("atletas.csv", b"Nombre")])
             return None
 
     bot, tg, _ = make(settings, tmp_path, Filer())
@@ -464,12 +468,26 @@ async def test_a_file_from_a_tool_is_uploaded_to_the_topic_where_it_was_asked(se
     assert tg.sent == []
 
 
+async def test_several_pictures_from_a_tool_go_as_one_album(settings, tmp_path):
+    from duma.tools import OutFile
+
+    class Drawer(FakeAgent):
+        async def run(self, session, text, user, send):
+            await send("", [OutFile("vueltas_1.png", b"a", photo=True), OutFile("vueltas_2.png", b"b", photo=True)])
+            return None
+
+    bot, tg, _ = make(settings, tmp_path, Drawer())
+    await bot.handle(msg("las vueltas en imagen", message_thread_id=7, is_topic_message=True))
+    assert tg.albums == [(ADMIN, [("vueltas_1.png", b"a"), ("vueltas_2.png", b"b")], "", 7)]
+    assert tg.photos == [] and tg.documents == [] and tg.sent == []
+
+
 async def test_a_chart_from_a_tool_is_shown_as_a_picture_not_attached(settings, tmp_path):
     from duma.tools import OutFile
 
     class Drawer(FakeAgent):
         async def run(self, session, text, user, send):
-            await send("", OutFile("km.png", b"\x89PNG", photo=True))
+            await send("", [OutFile("km.png", b"\x89PNG", photo=True)])
             return None
 
     bot, tg, _ = make(settings, tmp_path, Drawer())

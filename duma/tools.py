@@ -6,9 +6,9 @@ a chart drawn by `charts`, and the model gets back only a short acknowledgement
 with no names in it. `cifras`, `catalogo` and `consultar` answer the model:
 with totals, which identify nobody; with the names of groups and events; and
 with one row per person where the name is a code. `entrenos_atleta` and
-`vueltas_entreno` do both: the chat gets a table drawn by `charts`, with the
-athlete's name on it, and the model gets the same figures with no name at
-all. Either way the model never reads a person's name
+`vueltas_entreno` do both: the chat gets a table drawn by `charts` (or a CSV,
+or an album of tables), with the athlete's name on it, and the model gets the
+same figures with no name at all. Either way the model never reads a person's name
 it was not given by the admin.
 """
 
@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -27,7 +28,7 @@ from duma.api_client import ApiError, MuunganoApi
 from duma.confirmations import Confirmations
 from duma.preferences import PreferenceError, Preferences, clean
 from duma.pseudonyms import Pseudonyms
-from duma.render import _day, _day_year, _num, _period, _race_time, matches_csv, render_candidates, render_matches, render_summary
+from duma.render import _day, _day_year, _num, _period, _race_time, matches_csv, render_candidates, render_matches, render_summary, table_csv
 
 log = logging.getLogger(__name__)
 
@@ -47,8 +48,8 @@ class ToolResult:
     # What the model sees. Never contains athlete names.
     to_model: str
     is_error: bool = False
-    # Attached to the chat with `direct_text` as its caption. The model never sees it.
-    file: Optional[OutFile] = None
+    # Attached to the chat with `direct_text` as its caption; several pictures go as one album. The model never sees them.
+    files: list[OutFile] = field(default_factory=list)
     # (label, callback data) pairs shown under `direct_text`: a proposal waiting for an admin's click.
     buttons: Optional[list[tuple[str, str]]] = None
 
@@ -140,7 +141,7 @@ SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "entrenos_atleta",
         "description": (
-            "Manda al chat una tabla (imagen) con los entrenos que hizo un atleta y te devuelve a ti las mismas "
+            "Manda al chat los entrenos que hizo un atleta, como tabla en imagen o como CSV según `formato`, y te devuelve a ti las mismas "
             "filas: número del entreno, fecha, tipo, km, duración, ritmo, frecuencia cardiaca, score y cuántas "
             "vueltas tiene. Úsala cuando pregunten por un "
             "entreno en particular («su tirada de 32 km», «qué hizo el martes», «cuáles entrenos estás contando») o "
@@ -162,6 +163,15 @@ SCHEMAS: list[dict[str, Any]] = [
                 },
                 "km_min": {"type": "number", "description": "Solo entrenos de al menos estos km."},
                 "km_max": {"type": "number", "description": "Solo entrenos de a lo más estos km."},
+                "formato": {
+                    "type": "string",
+                    "enum": ["auto", "imagen", "csv"],
+                    "description": (
+                        "Cómo sale al chat. `auto` (por defecto): tabla en imagen hasta 40 filas, CSV si son más. "
+                        "`imagen` solo si el administrador pidió imagen: lo que no cabe en una se reparte en varias. "
+                        "`csv` solo si pidió archivo."
+                    ),
+                },
             },
             "required": ["nombre"],
         },
@@ -169,7 +179,7 @@ SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "vueltas_entreno",
         "description": (
-            "Manda al chat una tabla (imagen) con el desglose por vuelta (lap) de un entreno y te devuelve a ti las "
+            "Manda al chat el desglose por vuelta (lap) de un entreno, como tabla en imagen o como CSV según `formato`, y te devuelve a ti las "
             "mismas filas: distancia, duración, ritmo, frecuencia cardiaca y score de cada una. Una vuelta sin score es una que la prescripción no califica, "
             "como una recuperación. `entreno` es el número que trae la fila de `entrenos_atleta`: llama primero a "
             "esa."
@@ -180,6 +190,15 @@ SCHEMAS: list[dict[str, Any]] = [
                 "nombre": {"type": "string", "description": "El mismo nombre que usaste en `entrenos_atleta`."},
                 "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
                 "entreno": {"type": "integer", "description": "Número del entreno, de la fila de `entrenos_atleta`."},
+                "formato": {
+                    "type": "string",
+                    "enum": ["auto", "imagen", "csv"],
+                    "description": (
+                        "Cómo sale al chat. `auto` (por defecto): tabla en imagen hasta 40 filas, CSV si son más. "
+                        "`imagen` solo si el administrador pidió imagen: lo que no cabe en una se reparte en varias. "
+                        "`csv` solo si pidió archivo."
+                    ),
+                },
             },
             "required": ["nombre", "entreno"],
         },
@@ -579,7 +598,33 @@ LAP_COLUMNS = [
     ("Vuelta", 0.7, "left"), ("Distancia", 1.4, "right"), ("Tiempo", 1.5, "right"),
     ("Ritmo", 1.3, "right"), ("FC", 1.2, "right"), ("Score", 1.2, "right"),
 ]
-TABLE_SENT = " La tabla ya salió al chat como imagen: no repitas sus cifras; comenta en dos o tres líneas lo que importa."
+FORMATS = ("auto", "imagen", "csv")
+SENT = "{what}: no repitas sus cifras; comenta en dos o tres líneas lo que importa."
+WORKOUT_CSV = ["Fecha", "Tipo", "Km", "Tiempo", "Ritmo (min/km)", "FC (lpm)", "Score (%)", "Vueltas"]
+LAP_CSV = ["Vuelta", "Distancia (m)", "Tiempo", "Ritmo (min/km)", "FC (lpm)", "Score (%)"]
+
+
+def _format(args: dict[str, Any]) -> str:
+    chosen = args.get("formato") or "auto"
+    if chosen not in FORMATS:
+        raise ValueError(f"`formato` must be one of {', '.join(FORMATS)}")
+    return chosen
+
+
+def _pages(rows: list[Any]) -> list[list[Any]]:
+    """The rows in as few tables as fit them, all about the same size: 60 rows are two of 30, not 40 and 20."""
+    count = math.ceil(len(rows) / charts.TABLE_MAX_ROWS)
+    size = math.ceil(len(rows) / count)
+    return [rows[start : start + size] for start in range(0, len(rows), size)]
+
+
+def _csv_cells(row: dict[str, Any]) -> list[Any]:
+    return [
+        _race_time(round(row["duration_sec"])) if row.get("duration_sec") else "",
+        row.get("pace") or "",
+        f"{row['heart_rate']:.0f}" if row.get("heart_rate") else "",
+        "" if row.get("score") is None else _num(row["score"]),
+    ]
 
 
 def _cells(row: dict[str, Any]) -> list[str]:
@@ -724,7 +769,7 @@ class Toolbox:
         return ToolResult(
             caption,
             f"{total} resultado(s); mandé la lista al chat como archivo CSV.{left}{_understood(found)}",
-            file=OutFile("atletas.csv", matches_csv(found)),
+            files=[OutFile("atletas.csv", matches_csv(found))],
         )
 
     async def _propose_preference(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
@@ -909,7 +954,7 @@ class Toolbox:
                 f"Ranking de {metric} enviado al chat, del {start} al {end}: {ranked} personas con entrenos prescritos, "
                 f"se muestran {shown}." + _understood(found)
             )
-            return ToolResult("", acknowledgement, file=OutFile(f"ranking_{metric}.png", png, photo=True))
+            return ToolResult("", acknowledgement, files=[OutFile(f"ranking_{metric}.png", png, photo=True)])
 
         if kind == "dispersion":
             if not charts.has_spread(weeks):
@@ -922,7 +967,7 @@ class Toolbox:
                 f"Gráfica de dispersión del score enviada al chat, del {start} al {end}. Por semana (personas con "
                 "entrenos: mínimo / mediana / máximo): " + "; ".join(_week_spread(w) for w in weeks) + "." + _understood(found)
             )
-            return ToolResult("", acknowledgement, file=OutFile("dispersion_score.png", png, photo=True))
+            return ToolResult("", acknowledgement, files=[OutFile("dispersion_score.png", png, photo=True)])
 
         if not charts.has_data(weeks, metric):
             return ToolResult(
@@ -936,13 +981,14 @@ class Toolbox:
         if not one:
             # Totals of a set identify nobody, like `cifras`. One athlete's weeks stay out of the model.
             acknowledgement += " Por semana: " + "; ".join(_week_figures(w) for w in weeks) + "." + _understood(found)
-        return ToolResult("", acknowledgement, file=OutFile(f"{metric}.png", png, photo=True))
+        return ToolResult("", acknowledgement, files=[OutFile(f"{metric}.png", png, photo=True)])
 
     async def _workouts(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
         start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
         shortest, longest = _positive(args, "km_min"), _positive(args, "km_max")
         if shortest is not None and longest is not None and shortest > longest:
             raise ValueError("`km_min` is above `km_max`")
+        layout = _format(args)
         athlete_id = await self._pick(args, telegram_user_id, names)
         if isinstance(athlete_id, ToolResult):
             return athlete_id
@@ -965,20 +1011,52 @@ class Toolbox:
             f"{data['total']} entreno(s) hechos {period}.{kept} El número tras # es el que pide `vueltas_entreno`.\n"
             + "\n".join(_workout_row(w) for w in workouts)
         )
-        shown = workouts[-charts.TABLE_MAX_ROWS :]
-        count = f"{len(workouts)} entrenos" if len(shown) == len(workouts) else f"los últimos {len(shown)} de {len(workouts)}"
-        png = await asyncio.to_thread(
-            charts.table_png,
+        name = (data.get("athlete") or {}).get("name")
+        span = _period(data["period"]["from"], data["period"]["to"])
+        if layout == "csv" or (layout == "auto" and len(workouts) > charts.TABLE_MAX_ROWS):
+            rows = [
+                [w["date"], w.get("type") or "", w["distance_km"], *_csv_cells(w), w.get("laps") or ""] for w in workouts
+            ]
+            caption = f"{name + ': ' if name else ''}{len(workouts)} entrenos, {span}."
+            return ToolResult(
+                caption,
+                to_model + "\n" + SENT.format(what="La lista ya salió al chat como archivo CSV"),
+                files=[OutFile("entrenos.csv", table_csv(WORKOUT_CSV, rows))],
+            )
+        return await self._tables(
+            "entrenos",
             "Entrenos",
-            (data.get("athlete") or {}).get("name") or "Entrenos",
-            f"{_period(data['period']['from'], data['period']['to'])}  ·  {count}",
+            name or "Entrenos",
+            f"{span}  ·  {len(workouts)} entrenos",
             WORKOUT_COLUMNS,
-            [[_day(w["date"]), w.get("type") or charts.EMPTY_CELL, f"{w['distance_km']:.1f}", *_cells(w)] for w in shown],
+            [[_day(w["date"]), w.get("type") or charts.EMPTY_CELL, f"{w['distance_km']:.1f}", *_cells(w)] for w in workouts],
+            to_model,
         )
-        return ToolResult("", to_model + "\n" + TABLE_SENT.strip(), file=OutFile("entrenos.png", png, photo=True))
+
+    async def _tables(
+        self,
+        filename: str,
+        label: str,
+        title: str,
+        subtitle: str,
+        columns: list[tuple[str, float, str]],
+        rows: list[list[str]],
+        to_model: str,
+    ) -> ToolResult:
+        """The rows as one picture, or as an album when one cannot hold them."""
+        pages = _pages(rows)
+        files = []
+        for n, page in enumerate(pages, 1):
+            mark = f"  ·  {n} de {len(pages)}" if len(pages) > 1 else ""
+            png = await asyncio.to_thread(charts.table_png, label, title, subtitle + mark, columns, page)
+            suffix = f"_{n}" if len(pages) > 1 else ""
+            files.append(OutFile(f"{filename}{suffix}.png", png, photo=True))
+        what = "La tabla ya salió al chat como imagen" if len(pages) == 1 else f"La tabla ya salió al chat en {len(pages)} imágenes"
+        return ToolResult("", to_model + "\n" + SENT.format(what=what), files=files)
 
     async def _laps(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
         workout_id = _integer(args, "entreno", 1, 2**31 - 1)
+        layout = _format(args)
         athlete_id = await self._pick(args, telegram_user_id, names)
         if isinstance(athlete_id, ToolResult):
             return athlete_id
@@ -994,23 +1072,29 @@ class Toolbox:
             f"Entreno #{workout_id} del {data['date']}: {data['total']} vuelta(s).{kept}\n"
             + "\n".join(_lap_row(lap) for lap in laps)
         )
-        if len(laps) > charts.TABLE_MAX_ROWS:
-            return ToolResult(None, to_model + "\nSon demasiadas vueltas para una tabla: resume tú lo que importa.")
+        name = (data.get("athlete") or {}).get("name")
+        if layout == "csv" or (layout == "auto" and len(laps) > charts.TABLE_MAX_ROWS):
+            rows = [[lap["lap"], f"{lap['distance_m']:.0f}" if lap.get("distance_m") else "", *_csv_cells(lap)] for lap in laps]
+            caption = f"{name + ': ' if name else ''}{len(laps)} vueltas del {_day_year(data['date'])}."
+            return ToolResult(
+                caption,
+                to_model + "\n" + SENT.format(what="La lista ya salió al chat como archivo CSV"),
+                files=[OutFile("vueltas.csv", table_csv(LAP_CSV, rows))],
+            )
         whole = data.get("workout") or {}
         totals = [f"{whole['distance_km']:.2f} km"] if whole.get("distance_km") else []
         totals += [c for c in _cells(whole)[:1] if c != charts.EMPTY_CELL]
         totals += [f"{whole['pace']} min/km"] if whole.get("pace") else []
         totals += [f"FC {whole['heart_rate']:.0f} lpm"] if whole.get("heart_rate") else []
-        name = (data.get("athlete") or {}).get("name")
-        png = await asyncio.to_thread(
-            charts.table_png,
+        return await self._tables(
+            "vueltas",
             "Vueltas",
             f"{name} · {_day_year(data['date'])}" if name else _day_year(data["date"]),
             "  ·  ".join(totals) or f"{data['total']} vueltas",
             LAP_COLUMNS,
             [[str(lap["lap"]), _distance(lap.get("distance_m")), *_cells(lap)] for lap in laps],
+            to_model,
         )
-        return ToolResult("", to_model + "\n" + TABLE_SENT.strip(), file=OutFile("vueltas.png", png, photo=True))
 
     async def _summary(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms] = None) -> ToolResult:
         start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")

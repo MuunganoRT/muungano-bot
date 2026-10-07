@@ -697,6 +697,36 @@ modelo encima de ellas pueden fallar.
   1,024; una lista de más de 50 personas se manda como CSV.
 - **Bitácora de auditoría:** cuánto tiempo se conserva `state/audit.log` y quién puede leerlo.
 
+### Tablas: imagen, CSV o varias imágenes (2026-10-07)
+
+`entrenos_atleta` y `vueltas_entreno` reciben `formato`:
+
+| `formato` | Filas | Qué manda |
+|---|---|---|
+| `auto` (default) | ≤ 40 | una tabla en imagen |
+| `auto` | > 40 | un CSV con todas las filas |
+| `imagen` (el admin la pidió así) | > 40 | álbum: `páginas = ceil(filas / 40)`, filas repartidas parejo (60 → 2 de 30; 120 → 3 de 40); cada imagen dice «1 de 3» |
+| `csv` | cualquiera | un CSV |
+
+`ToolResult.files` es una lista: una foto sale con `sendPhoto`, varias como álbum con `sendMediaGroup`
+(`Telegram.send_photos`, 10 por álbum). El modelo recibe siempre todas las filas, sin nombre.
+
+---|---|---|
+| `auto` (default) | ≤ 40 | una tabla en imagen, como hoy |
+| `auto` | > 40 | un CSV con todas las filas |
+| `imagen` (el admin la pidió así) | > 40 | álbum: `páginas = ceil(filas / 40)`, filas repartidas parejo (60 → 2 de 30; 120 → 3 de 40); cada imagen dice «1 de 3» |
+| `csv` | cualquiera | un CSV |
+
+Cambios:
+
+1. `duma/tools.py`: `ToolResult.file` pasa a `files: list[OutFile]`; `formato` en los dos esquemas; `_workouts` deja de
+   cortar a los últimos 40 y `_laps` deja de negarse arriba de 40; CSV de entrenos y de vueltas.
+2. `duma/charts.py`: `table_png` acepta la marca de página.
+3. `duma/telegram_api.py`: `send_photos` sobre `sendMediaGroup` (2 a 10 fotos por álbum).
+4. `duma/agent.py` y `duma/main.py`: pasan la lista; una foto sale con `send_photo`, varias como álbum.
+5. `prompts/system.md`: cuándo pedir `imagen` o `csv`.
+6. Pruebas en `tests/test_tools.py`, `test_charts.py`, `test_telegram_api.py`, `test_main.py`.
+
 ---
 
 ## 12. Producción: qué está desplegado y qué falta
