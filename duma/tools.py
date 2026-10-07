@@ -5,8 +5,10 @@ Two kinds. "Direct" tools (`buscar_atleta`, `resumen_atleta`, `buscar_atletas`,
 a chart drawn by `charts`, and the model gets back only a short acknowledgement
 with no names in it. `cifras`, `catalogo` and `consultar` answer the model:
 with totals, which identify nobody; with the names of groups and events; and
-with one row per person where the name is a code. Either way the model never
-reads a person's name it was not given by the admin.
+with one row per person where the name is a code. `entrenos_atleta` and
+`vueltas_entreno` answer the model too, with one athlete's workouts and laps as
+figures and no name at all. Either way the model never reads a person's name
+it was not given by the admin.
 """
 
 from __future__ import annotations
@@ -132,6 +134,52 @@ SCHEMAS: list[dict[str, Any]] = [
                 },
             },
             "required": ["nombre"],
+        },
+    },
+    {
+        "name": "entrenos_atleta",
+        "description": (
+            "Te devuelve, solo a ti, los entrenos que hizo un atleta, uno por fila: número del entreno, fecha, tipo, "
+            "km, duración, ritmo, frecuencia cardiaca, score y cuántas vueltas tiene. Úsala cuando pregunten por un "
+            "entreno en particular («su tirada de 32 km», «qué hizo el martes», «cuáles entrenos estás contando») o "
+            "cuando necesites sus ritmos y distancias para razonar o estimar algo. Con `km_min` y `km_max` buscas "
+            "por distancia: para «el de 32 km» pide de 30 a 34. No trae los entrenos no hechos ni el título que "
+            "puso el coach. Tope: 60 entrenos; si hay más, quedan los más largos. El nombre se resuelve igual que "
+            "en `resumen_atleta`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre y/o apellido del atleta."},
+                "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
+                "desde": {"type": "string", "description": "Fecha inicial YYYY-MM-DD. Por defecto, 30 días atrás."},
+                "hasta": {"type": "string", "description": "Fecha final YYYY-MM-DD. Por defecto, hoy."},
+                "ciclo": {
+                    "type": "boolean",
+                    "description": "Cubrir desde el inicio de su ciclo de entrenamiento hasta hoy (o la carrera).",
+                },
+                "km_min": {"type": "number", "description": "Solo entrenos de al menos estos km."},
+                "km_max": {"type": "number", "description": "Solo entrenos de a lo más estos km."},
+            },
+            "required": ["nombre"],
+        },
+    },
+    {
+        "name": "vueltas_entreno",
+        "description": (
+            "Te devuelve, solo a ti, el desglose por vuelta (lap) de un entreno: distancia, duración, ritmo, "
+            "frecuencia cardiaca y score de cada una. Una vuelta sin score es una que la prescripción no califica, "
+            "como una recuperación. `entreno` es el número que trae la fila de `entrenos_atleta`: llama primero a "
+            "esa."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "El mismo nombre que usaste en `entrenos_atleta`."},
+                "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
+                "entreno": {"type": "integer", "description": "Número del entreno, de la fila de `entrenos_atleta`."},
+            },
+            "required": ["nombre", "entreno"],
         },
     },
     {
@@ -485,6 +533,42 @@ def _row(code: str, person: dict[str, Any], summary: Optional[dict[str, Any]]) -
     return " | ".join(parts)
 
 
+def _positive(args: dict[str, Any], key: str) -> Optional[float]:
+    raw = args.get(key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not 0 <= raw <= 500:
+        raise ValueError(f"`{key}` must be a number of km between 0 and 500")
+    return float(raw)
+
+
+def _measures(row: dict[str, Any]) -> list[str]:
+    """Duration, pace, heart rate and score of a workout or a lap, each only when there is one."""
+    parts = []
+    if row.get("duration_sec"):
+        parts.append(_race_time(round(row["duration_sec"])))
+    if row.get("pace"):
+        parts.append(f"{row['pace']} min/km")
+    if row.get("heart_rate"):
+        parts.append(f"FC {row['heart_rate']:.0f} lpm")
+    if row.get("score") is not None:
+        parts.append(f"score {row['score']}%")
+    return parts
+
+
+def _workout_row(workout: dict[str, Any]) -> str:
+    parts = [f"#{workout['id']}", workout["date"], workout.get("type") or "sin tipo", f"{workout['distance_km']} km"]
+    parts += _measures(workout)
+    if workout.get("laps"):
+        parts.append(f"{workout['laps']} vueltas")
+    return " | ".join(parts)
+
+
+def _lap_row(lap: dict[str, Any]) -> str:
+    distance = f"{lap['distance_m']:.0f} m" if lap.get("distance_m") else "sin distancia"
+    return " | ".join([f"vuelta {lap['lap']}", distance, *_measures(lap)])
+
+
 def _candidate_label(athlete: dict[str, Any]) -> str:
     group = athlete.get("group")
     label = f"{athlete['name']} · {group}" if group else athlete["name"]
@@ -552,6 +636,8 @@ class Toolbox:
             "preguntar": self._ask,
             "grafica": lambda a, u: self._chart(a, u, names),
             "consultar": lambda a, u: self._analyze(a, u, names),
+            "entrenos_atleta": lambda a, u: self._workouts(a, u, names),
+            "vueltas_entreno": lambda a, u: self._laps(a, u, names),
         }
         handlers["resumen_atleta"] = lambda a, u: self._summary(a, u, names)
         if self._confirmations and self._preferences:
@@ -822,6 +908,54 @@ class Toolbox:
             # Totals of a set identify nobody, like `cifras`. One athlete's weeks stay out of the model.
             acknowledgement += " Por semana: " + "; ".join(_week_figures(w) for w in weeks) + "." + _understood(found)
         return ToolResult("", acknowledgement, file=OutFile(f"{metric}.png", png, photo=True))
+
+    async def _workouts(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        shortest, longest = _positive(args, "km_min"), _positive(args, "km_max")
+        if shortest is not None and longest is not None and shortest > longest:
+            raise ValueError("`km_min` is above `km_max`")
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
+
+        params: dict[str, Any] = {}
+        for key, value in (("from", start), ("to", end), ("min_km", shortest), ("max_km", longest)):
+            if value is not None:
+                params[key] = value
+        if args.get("ciclo"):
+            params["use_cycle"] = "true"
+        data = await self._api.get(
+            f"/assistant/athletes/{athlete_id}/workouts", telegram_user_id=telegram_user_id, params=params
+        )
+        period = f"del {data['period']['from']} al {data['period']['to']}"
+        workouts = data["workouts"]
+        if not workouts:
+            return ToolResult(None, f"Sin entrenos hechos {period} con esos filtros.")
+        kept = f" Van solo los {len(workouts)} más largos." if data.get("truncated") else ""
+        return ToolResult(
+            None,
+            f"{data['total']} entreno(s) hechos {period}.{kept} El número tras # es el que pide `vueltas_entreno`.\n"
+            + "\n".join(_workout_row(w) for w in workouts),
+        )
+
+    async def _laps(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        workout_id = _integer(args, "entreno", 1, 2**31 - 1)
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
+
+        data = await self._api.get(
+            f"/assistant/athletes/{athlete_id}/workouts/{workout_id}/laps", telegram_user_id=telegram_user_id
+        )
+        laps = data["laps"]
+        if not laps:
+            return ToolResult(None, f"El entreno #{workout_id} del {data['date']} no tiene vueltas registradas.")
+        kept = f" Van solo las primeras {len(laps)}." if data.get("truncated") else ""
+        return ToolResult(
+            None,
+            f"Entreno #{workout_id} del {data['date']}: {data['total']} vuelta(s).{kept}\n"
+            + "\n".join(_lap_row(lap) for lap in laps),
+        )
 
     async def _summary(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms] = None) -> ToolResult:
         start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")

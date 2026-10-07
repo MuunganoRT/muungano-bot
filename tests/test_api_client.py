@@ -35,6 +35,9 @@ async def test_sends_the_service_token_and_who_asked():
         ("GET", "/assistant"),
         ("GET", "/assistant/athletes/abc/summary"),
         ("GET", "/assistant/athletes/1/summary/extra"),
+        ("GET", "/assistant/athletes/1/workouts/abc/laps"),
+        ("GET", "/assistant/athletes/1/workouts/2"),
+        ("POST", "/assistant/athletes/1/workouts"),
         ("DELETE", "/assistant/athletes"),
         ("POST", "/assistant/athletes"),
         ("GET", "/assistant/athletes/query"),
@@ -58,6 +61,8 @@ async def test_the_read_routes_are_allowed():
     api = make(ok)
     await api.get("/assistant/athletes", telegram_user_id=1)
     await api.get("/assistant/athletes/12/summary", telegram_user_id=1)
+    await api.get("/assistant/athletes/12/workouts", telegram_user_id=1)
+    await api.get("/assistant/athletes/12/workouts/345/laps", telegram_user_id=1)
     await api.get("/assistant/catalog", telegram_user_id=1)
     await api.post("/assistant/athletes/query", telegram_user_id=1, json={"filters": []})
     await api.post("/assistant/athletes/aggregate", telegram_user_id=1, json={})

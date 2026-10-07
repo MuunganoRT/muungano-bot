@@ -53,14 +53,27 @@ haga las consultas previas que necesite y, si queda duda, pregunte. Es regla gen
 - Los grupos reales no se llaman "Maratón": son "42k MTY 3:45+", "42km Chicago 4:00", "Berlin 4:00hr",
   "Off Season - …". "Maratón" es un grupo de los datos de prueba.
 
+**Entrenos uno por uno y vueltas, escrito el 2026-10-07 (sin subir):** José Adrián pidió «busca su entrenamiento de 32 km y dime qué ves y qué proyectas» y Duma no tenía cómo verlo.
+- `muungano-api` (`dev`, **va primero**): `GET /assistant/athletes/{id}/workouts` (periodo o ciclo, `min_km`/`max_km`, tope 60, quedan los más largos) y `GET /assistant/athletes/{id}/workouts/{workout_id}/laps` (tope 120).
+- `muungano-bot` (`main`): herramientas `entrenos_atleta` y `vueltas_entreno`, que le contestan al modelo; sus rutas en `duma/api_client.py`; y en `prompts/system.md`, cuándo usarlas y que una proyección de carrera es un rango razonado para el coach.
+- Probado: pruebas automáticas de los dos repos, y las dos rutas contra los datos locales (una tirada de 32 km con 4 vueltas). Sin probar con el modelo real.
+
 **Lo siguiente, en orden:**
-1. Probar las tres gráficas en el grupo (se probaron contra el API local, con las imágenes revisadas; ninguna se
-   ha visto en Telegram).
-2. El menú de comandos al escribir `/` le aparece a Alex en el iPhone y no en la Mac. Comprobado en producción con
+1. El menú de comandos al escribir `/` le aparece a Alex en el iPhone y no en la Mac. Comprobado en producción con
    `getMyCommands`: los seis comandos están en el alcance `chat` del grupo y en ningún otro. Es el cliente de Mac;
    si reiniciarlo no basta, registrarlos también en el alcance `default`.
-3. Fase 3, newsletter (sección 5): job en el API, tabla de noticias del team, banco de frases y envío con
+2. Fase 3, newsletter (sección 5): job en el API, tabla de noticias del team, banco de frases y envío con
    confirmación. Las confirmaciones con botones ya existen (`duma/confirmations.py`).
+
+**Sin ver en Telegram, y no se va a probar a propósito** (decisión de Alex, 2026-10-07: si algo falla, él avisa):
+las tres gráficas, `catalogo`, las preguntas con botones y los botones de nombres ambiguos. Todo pasó sus pruebas
+automáticas y la prueba con el modelo real contra el API local, menos el clic de un botón, que solo tiene pruebas
+automáticas.
+
+**Configuración del servidor (2026-10-07):** `BOT_SESSION_IDLE_HOURS` estaba en 8 en `/app/data/bot/.env` y por eso
+los temas de la noche anterior se cerraron de madrugada; Alex ya lo cambió. También agregó a
+`TELEGRAM_ALLOWED_USER_IDS` el id `8942559308`, el único usuario que Duma estaba ignorando en el grupo (el log
+guarda el id, no el nombre; Alex lo identificó como José Adrián).
 
 **Gráficas, cómo quedaron:** `matplotlib`, solo 2D. La herramienta `grafica` dibuja por semana (lunes a domingo)
 entrenos hechos contra prescritos, km o score, de un atleta o de un conjunto por filtros; sin fechas cubre las
@@ -96,6 +109,7 @@ descartaron: exportan a imagen con un navegador sin cabeza.
 - Tope de gasto de $5 USD por día. El saldo que piensa pedirle al cliente para Anthropic es de $20 USD.
 - Comandos cortos y en inglés (`/clear`, `/help`, `/prefs`, `/forget`, `/usage`), salvo `/ruun`.
 - Sin commits ni push por iniciativa propia: los pide él, uno por uno.
+- No pedirle que pruebe en el grupo ni listar "falta probar en Telegram" como pendiente: si algo no funciona, lo dice.
 
 ## Decisiones tomadas (2026-10-01)
 
@@ -275,6 +289,7 @@ no tienen cifrado de extremo a extremo).
 | Resultado de una herramienta **directa** (resumen de atleta, `buscar_atletas`, newsletter, muestras) | **No.** Va del API al chat; a Claude le vuelve "enviado, 34 entrenos" |
 | Resultado de `cifras` (totales) | Sí, pero son números: no llevan nombres ni filas de atletas |
 | Resultado de `consultar` | Sí, **sin nombres**: se cambian por `ATLETA_07` antes y se restituyen al responder. El mapa se guarda con la sesión en `duma.sessions` y se borra con ella |
+| Resultado de `entrenos_atleta` y `vueltas_entreno` | Sí, **sin nombre**: fecha, tipo, km, duración, ritmo, FC y score de cada entreno y de cada vuelta de un atleta. Sin título ni descripción del calendario. Decisión de Alex, 2026-10-07 |
 | El texto que escribe el admin | **Sí, tal cual**, incluido el nombre que mencione. No se puede evitar: es lo que Claude tiene que leer |
 | Campos de texto libre (notas del calendario, comentarios) | No se incluyen en `consultar`: pueden traer nombres u otros datos |
 

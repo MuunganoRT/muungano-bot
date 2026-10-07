@@ -19,6 +19,8 @@ ALLOWED = (
     ("GET", re.compile(r"^/assistant/athletes$")),
     ("GET", re.compile(r"^/assistant/catalog$")),
     ("GET", re.compile(r"^/assistant/athletes/\d+/summary$")),
+    ("GET", re.compile(r"^/assistant/athletes/\d+/workouts$")),
+    ("GET", re.compile(r"^/assistant/athletes/\d+/workouts/\d+/laps$")),
     ("POST", re.compile(r"^/assistant/athletes/query$")),
     ("POST", re.compile(r"^/assistant/athletes/aggregate$")),
     ("POST", re.compile(r"^/assistant/athletes/series$")),

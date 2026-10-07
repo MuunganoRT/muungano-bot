@@ -35,6 +35,10 @@ class FakeApi:
             }
         if path == "/assistant/athletes":
             return {"success": True, "athletes": self.athletes, "total": len(self.athletes)}
+        if path.endswith("/workouts"):
+            return self.workouts
+        if path.endswith("/laps"):
+            return self.laps
         return self.summary
 
     async def post(self, path, *, telegram_user_id, json):
@@ -62,6 +66,28 @@ class FakeApi:
             "notes": self.notes,
         }
 
+    workouts = {
+        "success": True,
+        "period": {"from": "2026-09-01", "to": "2026-09-30"},
+        "total": 2,
+        "truncated": False,
+        "workouts": [
+            {"id": 1, "date": "2026-09-10", "type": "Easy Run", "distance_km": 10.0, "duration_sec": 3300,
+             "pace": "5:30", "heart_rate": 150.0, "score": 95.0, "laps": 0},
+            {"id": 2, "date": "2026-09-20", "type": "Quality Session", "distance_km": 32.1, "duration_sec": 9690,
+             "pace": "5:02", "heart_rate": None, "score": 98.0, "laps": 2},
+        ],
+    }
+    laps = {
+        "success": True,
+        "date": "2026-09-20",
+        "total": 2,
+        "truncated": False,
+        "laps": [
+            {"lap": 1, "distance_m": 31000.0, "duration_sec": 9330.0, "pace": "5:01", "heart_rate": 172.0, "score": 98.0},
+            {"lap": 2, "distance_m": 1100.0, "duration_sec": 360.0, "pace": "5:27", "heart_rate": None, "score": None},
+        ],
+    }
     matched = {"events": [], "groups": []}
     notes: list = []
     total = None
@@ -589,3 +615,61 @@ async def test_a_group_filter_can_join_several_groups():
     assert api.calls[-1][1]["filters"] == [{"type": "group", "name": "42k MTY", "also": ["Berlin"]}]
     bad = await Toolbox(api).run("cifras", {"metricas": ["personas"], "filtros": [{"tipo": "grupo", "nombre": "MTY", "otros": ["x"]}]}, 1)
     assert bad.is_error
+
+
+async def test_one_athletes_workouts_go_to_the_model_as_figures_and_never_to_the_chat():
+    api = FakeApi([ANA_P])
+    args = {"nombre": "ana pena", "ciclo": True, "km_min": 30, "km_max": 34}
+    r = await Toolbox(api).run("entrenos_atleta", args, 956)
+    assert r.direct_text is None and r.file is None and not r.is_error
+    assert r.to_model.splitlines() == [
+        "2 entreno(s) hechos del 2026-09-01 al 2026-09-30. El número tras # es el que pide `vueltas_entreno`.",
+        "#1 | 2026-09-10 | Easy Run | 10.0 km | 0:55:00 | 5:30 min/km | FC 150 lpm | score 95.0%",
+        "#2 | 2026-09-20 | Quality Session | 32.1 km | 2:41:30 | 5:02 min/km | score 98.0% | 2 vueltas",
+    ]
+    assert "Ana" not in r.to_model
+    path, params, user = api.calls[-1]
+    assert path == "/assistant/athletes/10/workouts" and user == 956
+    assert params == {"min_km": 30.0, "max_km": 34.0, "use_cycle": "true"}
+
+
+async def test_workouts_say_when_there_are_none_and_when_only_the_longest_came():
+    api = FakeApi([ANA_P])
+    api.workouts = {**FakeApi.workouts, "total": 0, "workouts": []}
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana pena"}, 1)
+    assert r.to_model == "Sin entrenos hechos del 2026-09-01 al 2026-09-30 con esos filtros."
+
+    api.workouts = {**FakeApi.workouts, "total": 80, "truncated": True}
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana pena"}, 1)
+    assert r.to_model.startswith("80 entreno(s) hechos del 2026-09-01 al 2026-09-30. Van solo los 2 más largos.")
+
+
+async def test_workouts_refuse_a_bad_distance_and_ask_the_admin_about_a_namesake():
+    api = FakeApi([ANA_P, ANA_R])
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana", "km_min": 34, "km_max": 30}, 1)
+    assert r.is_error and api.calls == []
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana", "km_min": "32"}, 1)
+    assert r.is_error and api.calls == []
+
+    r = await Toolbox(api).run("entrenos_atleta", {"nombre": "ana"}, 1)
+    assert "Ana Ruiz" in r.direct_text and "Ana" not in r.to_model
+    assert all(not path.endswith("/workouts") for path, _, _ in api.calls)
+
+
+async def test_the_laps_of_one_workout():
+    api = FakeApi([ANA_P])
+    r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2}, 956)
+    assert r.direct_text is None and not r.is_error
+    assert r.to_model.splitlines() == [
+        "Entreno #2 del 2026-09-20: 2 vuelta(s).",
+        "vuelta 1 | 31000 m | 2:35:30 | 5:01 min/km | FC 172 lpm | score 98.0%",
+        "vuelta 2 | 1100 m | 0:06:00 | 5:27 min/km",
+    ]
+    assert api.calls[-1][0] == "/assistant/athletes/10/workouts/2/laps"
+
+    api.laps = {**FakeApi.laps, "total": 0, "laps": []}
+    r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena", "entreno": 2}, 956)
+    assert r.to_model == "El entreno #2 del 2026-09-20 no tiene vueltas registradas."
+
+    r = await Toolbox(api).run("vueltas_entreno", {"nombre": "ana pena"}, 956)
+    assert r.is_error
