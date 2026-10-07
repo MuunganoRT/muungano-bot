@@ -11,6 +11,7 @@ class FakeTelegram:
     def __init__(self, topics=False):
         self.sent, self.actions, self.left, self.created, self.forwarded = [], [], [], [], []
         self.documents, self.keyboards, self.popups, self.edits = [], [], [], []
+        self.photos = []
         self.closed, self.undeletable = [], set()
         self.files = {"voz1": b"OggS fake", "csv1": "Nombre,Grupo\nAna,Maratón\n".encode(), "png1": b"\x89PNG fake"}
         self.attempts, self._topics, self._next = 0, topics, 500
@@ -42,6 +43,9 @@ class FakeTelegram:
 
     async def send_document(self, chat_id, filename, content, caption="", thread_id=None):
         self.documents.append((chat_id, filename, content, caption, thread_id))
+
+    async def send_photo(self, chat_id, filename, content, caption="", thread_id=None):
+        self.photos.append((chat_id, filename, content, caption, thread_id))
 
     async def send_chat_action(self, chat_id, thread_id=None, action="typing"):
         self.actions.append((chat_id, thread_id))
@@ -458,6 +462,20 @@ async def test_a_file_from_a_tool_is_uploaded_to_the_topic_where_it_was_asked(se
     await bot.handle(msg("todos los del grupo", message_thread_id=7, is_topic_message=True))
     assert tg.documents == [(ADMIN, "atletas.csv", b"Nombre", "51 personas.", 7)]
     assert tg.sent == []
+
+
+async def test_a_chart_from_a_tool_is_shown_as_a_picture_not_attached(settings, tmp_path):
+    from duma.tools import OutFile
+
+    class Drawer(FakeAgent):
+        async def run(self, session, text, user, send):
+            await send("", OutFile("km.png", b"\x89PNG", photo=True))
+            return None
+
+    bot, tg, _ = make(settings, tmp_path, Drawer())
+    await bot.handle(msg("gráfica de km", message_thread_id=7, is_topic_message=True))
+    assert tg.photos == [(ADMIN, "km.png", b"\x89PNG", "", 7)]
+    assert tg.documents == [] and tg.sent == []
 
 
 # ── /ruun: the only way to ask from General ───────────────────────────

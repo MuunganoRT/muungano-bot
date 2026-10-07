@@ -1,8 +1,9 @@
 """The tools Duma's model can call.
 
-Two kinds. "Direct" tools (`buscar_atleta`, `resumen_atleta`, `buscar_atletas`)
-send what they find to the chat as text or a file built by `render`, and the
-model gets back only a short acknowledgement with no names in it. `cifras` and
+Two kinds. "Direct" tools (`buscar_atleta`, `resumen_atleta`, `buscar_atletas`,
+`grafica`) send what they find to the chat as text, a file built by `render` or
+a chart drawn by `charts`, and the model gets back only a short acknowledgement
+with no names in it. `cifras` and
 `consultar` answer the model: the first with totals, which identify nobody,
 and the second with one row per person where the name is a code. Either way
 the model never reads a name it was not given by the admin.
@@ -14,15 +15,16 @@ import asyncio
 import logging
 import unicodedata
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
-from duma import confirmations
+from duma import charts, confirmations
 from duma.api_client import ApiError, MuunganoApi
 from duma.confirmations import Confirmations
 from duma.preferences import PreferenceError, Preferences, clean
 from duma.pseudonyms import Pseudonyms
-from duma.render import _race_time, matches_csv, render_candidates, render_matches, render_summary
+from duma.render import _period, _race_time, matches_csv, render_candidates, render_matches, render_summary
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +33,8 @@ log = logging.getLogger(__name__)
 class OutFile:
     name: str
     content: bytes
+    # Shown in the chat as a picture instead of attached as a download.
+    photo: bool = False
 
 
 @dataclass
@@ -199,6 +203,34 @@ SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "name": "grafica",
+        "description": (
+            "Muestra en el chat una gráfica por semana (lunes a domingo): entrenos hechos contra prescritos, "
+            "kilómetros o score. De UN atleta (con `nombre`) o del conjunto de personas que cumplen `filtros`; no las "
+            "dos cosas. Sin `desde` y `hasta` cubre las últimas 8 semanas; el máximo son 92 días y, por filtros, 60 "
+            "personas. Tú no ves la imagen. De un atleta recibes solo el acuse; de un conjunto, además, los totales "
+            "por semana, que puedes comentar. Si el nombre es ambiguo, el administrador recibe los candidatos y te "
+            "contesta cuál."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "metrica": {"type": "string", "enum": ["entrenos", "km", "score"]},
+                "nombre": {"type": "string", "description": "Nombre y/o apellido, para la gráfica de un atleta."},
+                "grupo": {"type": "string", "description": "Con `nombre`: grupo del atleta, para distinguir homónimos."},
+                "filtros": FILTERS_SCHEMA,
+                "estado": {
+                    "type": "string",
+                    "enum": ["todos", "activos", "inactivos"],
+                    "description": "Con `filtros`. Por defecto `todos` (activos y pausados).",
+                },
+                "desde": {"type": "string", "description": "Inicio del periodo, YYYY-MM-DD."},
+                "hasta": {"type": "string", "description": "Fin del periodo, YYYY-MM-DD."},
+            },
+            "required": ["metrica"],
+        },
+    },
 ]
 
 PREFERENCE_SCHEMA: dict[str, Any] = {
@@ -274,6 +306,9 @@ QUERY_LIMIT = 500
 ANALYZE_ROWS = 60
 ANALYZE_ROWS_WITH_PERIOD = 25
 ANALYZE_CONCURRENCY = 5
+# Same zone as the API's "today".
+TZ = ZoneInfo("America/Monterrey")
+CHART_DEFAULT_WEEKS = 8
 
 
 def _integer(args: dict[str, Any], key: str, minimum: int, maximum: int) -> int:
@@ -370,6 +405,11 @@ def _row(code: str, person: dict[str, Any], summary: Optional[dict[str, Any]]) -
     return " | ".join(parts)
 
 
+def _week_figures(week: dict[str, Any]) -> str:
+    score = "sin score" if week["score_avg"] is None else f"score {week['score_avg']}"
+    return f"{week['week_start']}: {week['done']}/{week['prescribed']} entrenos, {week['distance_km']} km, {score}"
+
+
 def _understood(found: dict[str, Any]) -> str:
     """What the API matched, for the model: event and group names, never people."""
     matched = found.get("matched") or {}
@@ -416,6 +456,7 @@ class Toolbox:
             "resumen_atleta": self._summary,
             "buscar_atletas": self._query,
             "cifras": self._aggregate,
+            "grafica": lambda a, u: self._chart(a, u, names),
             "consultar": lambda a, u: self._analyze(a, u, names),
         }
         handlers["resumen_atleta"] = lambda a, u: self._summary(a, u, names)
@@ -551,18 +592,16 @@ class Toolbox:
         period = f" Periodo de entrenos: {start} a {end}." if start else ""
         return ToolResult(None, f"{total} persona(s).{period}{_understood(found)}\n" + "\n".join(rows))
 
-    async def _summary(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms] = None) -> ToolResult:
+    async def _pick(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> int | ToolResult:
+        """The one athlete `nombre` (and `grupo`) points at, or what to tell the admin when it is none or several."""
         name = _text(args, "nombre")
         group = args.get("grupo")
-        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
 
         known = names.athlete_id(name) if names else None
         if known is not None:
-            candidates = [{"id": known}]
-        else:
-            found = await self._find(name, "all", telegram_user_id)
-            candidates = found["athletes"]
-        if known is None and isinstance(group, str) and group.strip():
+            return known
+        candidates = (await self._find(name, "all", telegram_user_id))["athletes"]
+        if isinstance(group, str) and group.strip():
             wanted = _fold(group.strip())
             candidates = [a for a in candidates if wanted in _fold(a.get("group") or "")]
 
@@ -573,6 +612,59 @@ class Toolbox:
                 render_candidates(candidates, len(candidates), question=True),
                 f"Hay {len(candidates)} candidatos; ya le pregunté al administrador cuál. Espera su respuesta.",
             )
+        return candidates[0]["id"]
+
+    async def _chart(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms] = None) -> ToolResult:
+        metric = args.get("metrica")
+        if metric not in charts.METRICS:
+            raise ValueError("`metrica` must be one of: " + ", ".join(charts.METRICS))
+        one = args.get("nombre") not in (None, "")
+        if one and args.get("filtros"):
+            raise ValueError("send `nombre` or `filtros`, not both")
+
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        today = datetime.now(TZ).date()
+        end = end or today.isoformat()
+        start = start or (date.fromisoformat(end) - timedelta(weeks=CHART_DEFAULT_WEEKS) + timedelta(days=1)).isoformat()
+        if start > end:
+            raise ValueError("`desde` is after `hasta`")
+        body: dict[str, Any] = {"period": {"from": start, "to": end}}
+
+        if one:
+            athlete_id = await self._pick(args, telegram_user_id, names)
+            if isinstance(athlete_id, ToolResult):
+                return athlete_id
+            body["athlete_id"] = athlete_id
+        else:
+            body.update(filters=_filters(args), member_status=_member_status(args))
+
+        found = await self._api.post("/assistant/athletes/series", telegram_user_id=telegram_user_id, json=body)
+        weeks = found["weeks"]
+        if one:
+            who = found["athlete"]["name"]
+        else:
+            people = found["athletes"]
+            groups = (found.get("matched") or {}).get("groups") or []
+            who = (" / ".join(groups) + " · " if groups else "") + ("1 persona" if people == 1 else f"{people} personas")
+        if not charts.has_data(weeks, metric):
+            return ToolResult(
+                f"No hay nada que graficar de {who} en ese periodo.",
+                "Sin datos en ese periodo; ya se lo dije al administrador." + ("" if one else _understood(found)),
+            )
+
+        # Drawing is CPU work: off the event loop, so the bot keeps answering while it renders.
+        png = await asyncio.to_thread(charts.weekly_png, weeks, metric, f"{who} · {_period(start, end)}")
+        acknowledgement = f"Gráfica de {metric} enviada al chat: {len(weeks)} semanas, del {start} al {end}."
+        if not one:
+            # Totals of a set identify nobody, like `cifras`. One athlete's weeks stay out of the model.
+            acknowledgement += " Por semana: " + "; ".join(_week_figures(w) for w in weeks) + "." + _understood(found)
+        return ToolResult("", acknowledgement, file=OutFile(f"{metric}.png", png, photo=True))
+
+    async def _summary(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms] = None) -> ToolResult:
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
 
         params: dict[str, Any] = {}
         if start:
@@ -582,7 +674,7 @@ class Toolbox:
         if args.get("ciclo"):
             params["use_cycle"] = "true"
         data = await self._api.get(
-            f"/assistant/athletes/{candidates[0]['id']}/summary", telegram_user_id=telegram_user_id, params=params
+            f"/assistant/athletes/{athlete_id}/summary", telegram_user_id=telegram_user_id, params=params
         )
         done, prescribed = data["workouts"]["done"], data["workouts"]["prescribed"]
         return ToolResult(render_summary(data), f"Resumen enviado al chat: {done} de {prescribed} entrenos.")

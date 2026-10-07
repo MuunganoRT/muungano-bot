@@ -501,7 +501,9 @@ class Bot:
         attachment: Optional[media.Attachment] = None,
     ) -> None:
         async def say(reply: str, file: Optional[OutFile] = None, buttons: Optional[list[tuple[str, str]]] = None) -> None:
-            if file:
+            if file and file.photo:
+                await self._tg.send_photo(chat_id, file.name, file.content, reply, thread_id)
+            elif file:
                 await self._tg.send_document(chat_id, file.name, file.content, reply, thread_id)
             else:
                 await self._tg.send_message(chat_id, reply, thread_id, _keyboard(buttons))

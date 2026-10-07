@@ -12,6 +12,8 @@ dependencies = [
     "anthropic>=1.11",
     "asyncpg>=0.30",
     "httpx>=0.28",
+    # Charts, drawn in process: no browser, no service.
+    "matplotlib>=3.9",
     "python-dotenv>=1.0",
 ]
 

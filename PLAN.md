@@ -18,34 +18,33 @@ Lo marcado *(verificado)* lo leí en el repo, con su ruta. Lo marcado *(sin veri
 |---|---|---|---|
 | API | `/app/data/server` | `main`, `537b8a4` (PR #30, trae `/assistant/*`) | `api`, puerto 8000 |
 | API de pruebas | `/app/data/server-dev` | `dev`, `7275ae8` | `api-dev`, puerto 8001 |
-| Duma | `/app/data/bot` | `main`, `cd7eea0` | `bot` |
+| Duma | `/app/data/bot` | `main`, `3e58b32` (sin comprobar en el servidor tras el último push) | `bot` |
 
 Verificado: Duma llega a `GET /assistant/athletes`, `POST …/query` y `POST …/aggregate` en `127.0.0.1:8000` con su
 token; desde internet `/assistant` y `/test/assistant` dan 403; el API responde 200. El `ERROR … has no /assistant
 routes` que aparece en el log de Duma es de su arranque, antes de que llegaran las rutas: Duma solo lo comprueba al
 arrancar. Un `supervisorctl restart bot` lo limpia.
 
-**Sin commit en local:**
-- `muungano-bot`: este `PLAN.md`. Un push a `main` lo despliega solo (reinicia el bot).
-- `muungano-server` (`main`): la versión 0.1.4 completa — `CloudronManifest.json`, `Dockerfile`,
-  `python-constraints.txt` (nuevo), `supervisor/bot.conf` (nuevo) y `apache/app.conf`. La imagen ya corre en
-  producción; el repo no la refleja.
-- `Muungano/CLAUDE.md` (la raíz no es un repo): ya dice que el bot está en producción y cómo se despliega.
+**Sin commit en local:** nada. `muungano-server` quedó en `2360cab` (versión 0.1.4) y este repo en `3e58b32`.
+`Muungano/CLAUDE.md` (la raíz no es un repo) ya dice que el bot está en producción y cómo se despliega.
+
+**Probado en el grupo de producción** (Alex, 2026-10-06): `/ruun`, lista larga con CSV, cifras, `/usage`, nota de
+voz y una regla con botones.
+
+**Gráficas subidas el 2026-10-06:** la ruta `POST /assistant/athletes/series` está en `dev` (`6aee592`) y en `main`
+del API (PR de Alex); el bot, en `main`. El deploy instala `matplotlib` solo.
 
 **Lo siguiente, en orden:**
-1. Probar a Duma en el grupo de producción: `/ruun ¿cuántos inactivos hay?`, una lista larga (debe llegar el CSV),
-   una cifra, `/usage`, una nota de voz dentro de un tema, una regla permanente con sus botones. Nada de esto se ha
-   visto en Telegram contra el API real; en local solo se probó hasta `resumen_atleta` y `buscar_atleta`.
-2. Commit y push de la 0.1.4 en `muungano-server`.
-3. Fase 2, gráficas (sección 10). Decidido cómo: la herramienta devuelve el PNG en memoria, igual que el CSV; no
-   hay `enviar_archivo` ni carpeta `outbox`. Falta una ruta nueva en `muungano-api/routers/assistant.py` que
-   devuelva la serie por semana (entrenos, km, score) de un atleta o de un grupo: hoy solo hay totales del periodo.
-   Librería propuesta: `matplotlib`. Dibuja en el servidor sin navegador, deja controlar todo (colores, tipografía,
-   ejes, anotaciones, logo) y da un PNG directo. Las alternativas con mejor aspecto de fábrica (Plotly, Altair)
-   necesitan un navegador sin cabeza para exportar a imagen, que pesa cientos de MB en un contenedor de 2 GB que
-   ya comparte el API y Whisper. **Alex preguntó por librerías con personalización y esto no se le ha contestado.**
-4. Fase 3, newsletter (sección 5): job en el API, tabla de noticias del team, banco de frases y envío con
+1. Probar `grafica` en el grupo: no se ha visto en Telegram; se probó contra el API local, con la imagen revisada.
+2. Fase 3, newsletter (sección 5): job en el API, tabla de noticias del team, banco de frases y envío con
    confirmación. Las confirmaciones con botones ya existen (`duma/confirmations.py`).
+
+**Gráficas, cómo quedaron:** `matplotlib`, solo 2D. La herramienta `grafica` dibuja por semana (lunes a domingo)
+entrenos hechos contra prescritos, km o score, de un atleta o de un conjunto por filtros; sin fechas cubre las
+últimas 8 semanas. Topes del API: 92 días y 60 personas. La imagen se arma en memoria y sale como foto
+(`sendPhoto`). De un atleta el modelo recibe solo el acuse; de un conjunto, además, los totales por semana. El
+estilo (colores de la consola, tipografía, tamaño) son constantes al inicio de `duma/charts.py`. Plotly y Altair se
+descartaron: exportan a imagen con un navegador sin cabeza.
 
 **Cosas que ya costaron tiempo; no repetirlas:**
 - **El CI no tiene `.env`, base de datos ni `/app/data`.** Antes de subir al API, correr la suite como en GitHub:
@@ -535,7 +534,7 @@ Solo nombres. Los valores nunca van en el repo ni en el chat.
 ## 10. Fases
 
 Todo lo marcado está hecho y con commit; qué está desplegado y qué no, en la sección 12. "Probado en el
-grupo" quiere decir que Alex lo vio funcionar en Telegram; lo demás solo tiene pruebas automáticas (224, con valores
+grupo" quiere decir que Alex lo vio funcionar en Telegram; lo demás solo tiene pruebas automáticas (237, con valores
 falsos; 9 de ellas corren contra Postgres y se saltan si no hay uno) o la prueba contra el API local que se indica.
 
 ### Fase 0 — En el API (`muungano-api`, 2026-10-02)
@@ -607,7 +606,8 @@ modelo encima de ellas pueden fallar.
   - **Sin medir:** voces reales con ruido (la prueba fue con voz sintética limpia) y transcribir con tráfico en el API.
   - `state/` está en `/app/data`, que Cloudron respalda: el modelo entra en los respaldos. Si pesa, apuntar
     `BOT_VOICE_DIR` a `/run` o `/tmp` y que se vuelva a descargar tras un reinicio del contenedor.
-- [ ] Gráficas de datos
+- [x] Gráficas de datos (`charts.py` y la herramienta `grafica`, 2026-10-06): detalle en la sección 0 — *probada
+      contra el API local; falta en el grupo*
 
 ### Fase 3 — Newsletter
 

@@ -37,6 +37,11 @@ class FakeApi:
             raise self.fail
         if path.endswith("/aggregate"):
             return {"success": True, **self.figures, "matched": self.matched, "notes": self.notes}
+        if path.endswith("/series"):
+            who = {"athlete": {"id": json["athlete_id"], "name": "Ana Peña"}} if "athlete_id" in json else {
+                "matched": self.matched, "notes": self.notes
+            }
+            return {"success": True, "athletes": 1 if "athlete_id" in json else 12, "weeks": self.weeks, **who}
         if json.get("count_only"):
             return {"success": True, "total": len(self.athletes), "matched": self.matched, "notes": self.notes}
         return {
@@ -53,6 +58,10 @@ class FakeApi:
     notes: list = []
     total = None
     figures = {"athletes": 23}
+    weeks = [
+        {"week_start": "2026-09-07", "prescribed": 5, "done": 4, "distance_km": 38.2, "score_avg": 71.0},
+        {"week_start": "2026-09-14", "prescribed": 0, "done": 0, "distance_km": 0.0, "score_avg": None},
+    ]
 
 
 async def test_search_shows_the_list_and_tells_the_model_nothing_personal():
@@ -403,3 +412,73 @@ async def test_a_summary_can_be_asked_by_code_without_searching_by_name():
     api = FakeApi([])
     r = await Toolbox(api).run("resumen_atleta", {"nombre": "ATLETA_01"}, 1, names)
     assert [c[0] for c in api.calls] == ["/assistant/athletes/10/summary"] and r.direct_text.startswith("Ana Peña")
+
+
+PNG = b"\x89PNG\r\n\x1a\n"
+
+
+async def test_a_chart_of_one_athlete_goes_to_the_chat_as_a_picture_and_the_model_gets_no_figures():
+    api = FakeApi([ANA_P])
+    r = await Toolbox(api).run(
+        "grafica", {"metrica": "entrenos", "nombre": "ana peña", "desde": "2026-09-07", "hasta": "2026-09-20"}, 956
+    )
+    path, body, user = api.calls[-1]
+    assert path == "/assistant/athletes/series" and user == 956
+    assert body == {"period": {"from": "2026-09-07", "to": "2026-09-20"}, "athlete_id": 10}
+    assert r.file.name == "entrenos.png" and r.file.photo and r.file.content.startswith(PNG)
+    assert r.to_model == "Gráfica de entrenos enviada al chat: 2 semanas, del 2026-09-07 al 2026-09-20."
+    assert "Ana" not in r.to_model and "38.2" not in r.to_model
+
+
+async def test_a_chart_of_a_set_tells_the_model_the_weekly_totals():
+    api = FakeApi([])
+    api.matched = {"events": [], "groups": ["Maratón"]}
+    r = await Toolbox(api).run(
+        "grafica",
+        {"metrica": "km", "filtros": [{"tipo": "grupo", "nombre": "maraton"}], "estado": "activos",
+         "desde": "2026-09-07", "hasta": "2026-09-20"},
+        1,
+    )
+    assert api.calls[-1][1] == {
+        "period": {"from": "2026-09-07", "to": "2026-09-20"},
+        "filters": [{"type": "group", "name": "maraton"}],
+        "member_status": "active",
+    }
+    assert r.file.photo and r.file.content.startswith(PNG)
+    assert "2026-09-07: 4/5 entrenos, 38.2 km, score 71.0" in r.to_model
+    assert "2026-09-14: 0/0 entrenos, 0.0 km, sin score" in r.to_model and "Grupos: Maratón." in r.to_model
+
+
+async def test_a_chart_without_dates_covers_the_last_eight_weeks():
+    from datetime import date
+
+    api = FakeApi([ANA_P])
+    await Toolbox(api).run("grafica", {"metrica": "score", "nombre": "ana"}, 1)
+    period = api.calls[-1][1]["period"]
+    assert (date.fromisoformat(period["to"]) - date.fromisoformat(period["from"])).days == 55
+
+
+async def test_a_chart_asks_which_one_when_the_name_is_ambiguous_and_draws_nothing():
+    api = FakeApi([ANA_P, ANA_R])
+    r = await Toolbox(api).run("grafica", {"metrica": "km", "nombre": "ana"}, 1)
+    assert r.file is None and "Ana Ruiz" in r.direct_text and "candidatos" in r.to_model
+    assert all(not path.endswith("/series") for path, _, _ in api.calls)
+
+
+async def test_a_chart_with_nothing_to_draw_says_so_instead_of_an_empty_picture():
+    api = FakeApi([ANA_P])
+    api.weeks = [{"week_start": "2026-09-07", "prescribed": 0, "done": 0, "distance_km": 0.0, "score_avg": None}]
+    r = await Toolbox(api).run("grafica", {"metrica": "entrenos", "nombre": "ana"}, 1)
+    assert r.file is None and r.direct_text == "No hay nada que graficar de Ana Peña en ese periodo."
+
+
+async def test_a_chart_refuses_a_bad_request_before_calling_the_api():
+    api = FakeApi([ANA_P])
+    box = Toolbox(api)
+    for args in (
+        {"metrica": "ritmo", "nombre": "ana"},
+        {"metrica": "km", "nombre": "ana", "filtros": [{"tipo": "grupo", "nombre": "maraton"}]},
+        {"metrica": "km", "nombre": "ana", "desde": "2026-09-30", "hasta": "2026-09-01"},
+    ):
+        assert (await box.run("grafica", args, 1)).is_error, args
+    assert api.calls == []

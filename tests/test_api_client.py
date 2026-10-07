@@ -54,12 +54,13 @@ async def test_anything_off_the_allow_list_never_leaves(method, path):
     assert called == []
 
 
-async def test_the_four_read_routes_are_allowed():
+async def test_the_read_routes_are_allowed():
     api = make(ok)
     await api.get("/assistant/athletes", telegram_user_id=1)
     await api.get("/assistant/athletes/12/summary", telegram_user_id=1)
     await api.post("/assistant/athletes/query", telegram_user_id=1, json={"filters": []})
     await api.post("/assistant/athletes/aggregate", telegram_user_id=1, json={})
+    await api.post("/assistant/athletes/series", telegram_user_id=1, json={})
 
 
 async def test_the_per_minute_cap():

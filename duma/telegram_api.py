@@ -119,6 +119,22 @@ class Telegram:
             params["message_thread_id"] = thread_id
         await self._call("sendDocument", params, files={"document": (filename, content)})
 
+    async def send_photo(
+        self,
+        chat_id: int,
+        filename: str,
+        content: bytes,
+        caption: str = "",
+        thread_id: Optional[int] = None,
+    ) -> None:
+        """A picture shown in the chat itself. Telegram recompresses it; `send_document` keeps the original."""
+        params: dict[str, Any] = {"chat_id": chat_id}
+        if caption:
+            params["caption"] = caption[:MAX_CAPTION]
+        if thread_id:
+            params["message_thread_id"] = thread_id
+        await self._call("sendPhoto", params, files={"photo": (filename, content, "image/png")})
+
     async def download(self, file_id: str) -> bytes:
         """The bytes of a file an admin sent. Telegram serves files of up to 20 MB to bots."""
         info = await self._call("getFile", {"file_id": file_id})

@@ -14,12 +14,13 @@ from typing import Any, Optional
 
 import httpx
 
-# Every route is a read, even the two POSTs: they take a body of filters.
+# Every route is a read, even the POSTs: they take a body of filters.
 ALLOWED = (
     ("GET", re.compile(r"^/assistant/athletes$")),
     ("GET", re.compile(r"^/assistant/athletes/\d+/summary$")),
     ("POST", re.compile(r"^/assistant/athletes/query$")),
     ("POST", re.compile(r"^/assistant/athletes/aggregate$")),
+    ("POST", re.compile(r"^/assistant/athletes/series$")),
 )
 
 

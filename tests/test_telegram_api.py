@@ -108,6 +108,19 @@ async def test_send_document_uploads_the_file_with_its_caption_in_the_topic():
     assert b"51 personas." in body and b'name="message_thread_id"' in body
 
 
+async def test_send_photo_uploads_the_picture_to_the_topic():
+    seen = []
+
+    def handler(request):
+        seen.append((request.url.path, request.content))
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    await make(handler).send_photo(-100, "km.png", b"\x89PNG", thread_id=7)
+    path, body = seen[0]
+    assert path.endswith("/sendPhoto") and b'name="photo"; filename="km.png"' in body
+    assert b"image/png" in body and b'name="message_thread_id"' in body and b'name="caption"' not in body
+
+
 async def test_a_caption_too_long_for_telegram_goes_first_as_a_message():
     methods = []
 
