@@ -1,13 +1,77 @@
 # Duma, el bot de Muungano — plan
 
-Estado: **en construcción**. Hecho y pendiente, con casillas, en la sección 10. Nada tiene commit ni está desplegado.
-Plan del 2026-10-01, actualizado el 2026-10-06.
+Estado: **Duma corre en producción y ya puede consultar datos** (verificado el 2026-10-06 por la noche: desde su
+propio proceso las tres rutas del asistente contestan). Falta que alguien le pregunte en el grupo. Para retomar el
+trabajo, empieza por la sección 0. Plan del 2026-10-01, actualizado el 2026-10-06.
 
 **Duma** vive en un grupo de Telegram solo para admins, donde se le pregunta a Claude por datos de Muungano (atletas, entrenos, eventos,
 pagos, reportes). Es la versión ligera de un sistema que ya existe en otro proyecto (Magical Emporium): mismo
 principio —permisos duros, sesión que se rota— sin Notion, sin Meta Ads, sin trabajos nocturnos y con **General como recepción**: cada petición abre su propio tema.
 
 Lo marcado *(verificado)* lo leí en el repo, con su ruta. Lo marcado *(sin verificar)* es hipótesis.
+
+## 0. Para retomar (estado al cierre de la sesión del 2026-10-06)
+
+**Qué corre en producción** (`api.muungano.mx`, Cloudron `my.muungano.mx`, imagen `adestech/muungano-api:0.1.4`):
+
+| Pieza | Carpeta | Rama y commit | Programa de supervisor |
+|---|---|---|---|
+| API | `/app/data/server` | `main`, `537b8a4` (PR #30, trae `/assistant/*`) | `api`, puerto 8000 |
+| API de pruebas | `/app/data/server-dev` | `dev`, `7275ae8` | `api-dev`, puerto 8001 |
+| Duma | `/app/data/bot` | `main`, `cd7eea0` | `bot` |
+
+Verificado: Duma llega a `GET /assistant/athletes`, `POST …/query` y `POST …/aggregate` en `127.0.0.1:8000` con su
+token; desde internet `/assistant` y `/test/assistant` dan 403; el API responde 200. El `ERROR … has no /assistant
+routes` que aparece en el log de Duma es de su arranque, antes de que llegaran las rutas: Duma solo lo comprueba al
+arrancar. Un `supervisorctl restart bot` lo limpia.
+
+**Sin commit en local:**
+- `muungano-bot`: este `PLAN.md`. Un push a `main` lo despliega solo (reinicia el bot).
+- `muungano-server` (`main`): la versión 0.1.4 completa — `CloudronManifest.json`, `Dockerfile`,
+  `python-constraints.txt` (nuevo), `supervisor/bot.conf` (nuevo) y `apache/app.conf`. La imagen ya corre en
+  producción; el repo no la refleja.
+- `Muungano/CLAUDE.md` (la raíz no es un repo): ya dice que el bot está en producción y cómo se despliega.
+
+**Lo siguiente, en orden:**
+1. Probar a Duma en el grupo de producción: `/ruun ¿cuántos inactivos hay?`, una lista larga (debe llegar el CSV),
+   una cifra, `/usage`, una nota de voz dentro de un tema, una regla permanente con sus botones. Nada de esto se ha
+   visto en Telegram contra el API real; en local solo se probó hasta `resumen_atleta` y `buscar_atleta`.
+2. Commit y push de la 0.1.4 en `muungano-server`.
+3. Fase 2, gráficas (sección 10). Decidido cómo: la herramienta devuelve el PNG en memoria, igual que el CSV; no
+   hay `enviar_archivo` ni carpeta `outbox`. Falta una ruta nueva en `muungano-api/routers/assistant.py` que
+   devuelva la serie por semana (entrenos, km, score) de un atleta o de un grupo: hoy solo hay totales del periodo.
+   Librería propuesta: `matplotlib`. Dibuja en el servidor sin navegador, deja controlar todo (colores, tipografía,
+   ejes, anotaciones, logo) y da un PNG directo. Las alternativas con mejor aspecto de fábrica (Plotly, Altair)
+   necesitan un navegador sin cabeza para exportar a imagen, que pesa cientos de MB en un contenedor de 2 GB que
+   ya comparte el API y Whisper. **Alex preguntó por librerías con personalización y esto no se le ha contestado.**
+4. Fase 3, newsletter (sección 5): job en el API, tabla de noticias del team, banco de frases y envío con
+   confirmación. Las confirmaciones con botones ya existen (`duma/confirmations.py`).
+
+**Cosas que ya costaron tiempo; no repetirlas:**
+- **El CI no tiene `.env`, base de datos ni `/app/data`.** Antes de subir al API, correr la suite como en GitHub:
+  `ARCHIVE_DIR=/app/data/muungano_raw SAMPLES_DIR=/app/data/muungano_samples JWT_SECRET= PG_HOST= .venv/bin/python -m pytest -q`
+  y `ruff check .` (largo de línea 100). En local el `.env` tapa esos errores.
+- **Solo un Duma por token.** Con el de producción prendido, no arrancar otro en local con el mismo bot: se pelean
+  (`409 Conflict`). Para desarrollar en local hace falta otro bot de BotFather y otro grupo, o apagar el de producción.
+- **En el `.env` del servidor no va `BOT_DATABASE_URL`**: Duma toma `CLOUDRON_POSTGRESQL_URL`.
+- **El guard de secretos bloquea** cualquier comando con `env`, `.env` o `os.environ` dentro de `cloudron exec`. Para
+  comprobar la configuración sin leer valores: correr dentro del contenedor un script que use `duma.config.load()` e
+  imprima solo lo que no es secreto (servidor y puerto, sí/no).
+- **Reconstruir la imagen de Cloudron** reinstala las librerías de Python; por eso existe `python-constraints.txt`.
+  Pasos en la sección 12.
+- **Este archivo no tenía copia.** Al editarlo con un script se truncó una vez y hubo que reconstruir las secciones
+  11 a 13 de memoria. Editarlo con reemplazos puntuales y comprobar al final que siguen las 14 secciones (0 a 13).
+- **`huggingface_hub` con Xet se atora** al bajar el modelo de voz; `duma/voice.py` lo desactiva.
+- **`faster-whisper` 1.2 no decodifica con PyAV reciente**; `duma/voice.py` decodifica el audio él mismo.
+
+**Decisiones de Alex que no están en el código:**
+- `muungano-bot` solo tiene `main` y se sube directo. El API sigue con `dev` y PR a `main`.
+- Estado de Duma en PostgreSQL, no SQLite, aunque en producción comparta usuario con el API.
+- Voz con Whisper local, no con un proveedor externo.
+- `BOT_API_URL` de producción en el puerto 8000, sin pasar por el API de pruebas.
+- Tope de gasto de $5 USD por día. El saldo que piensa pedirle al cliente para Anthropic es de $20 USD.
+- Comandos cortos y en inglés (`/clear`, `/help`, `/prefs`, `/forget`, `/usage`), salvo `/ruun`.
+- Sin commits ni push por iniciativa propia: los pide él, uno por uno.
 
 ## Decisiones tomadas (2026-10-01)
 
@@ -113,13 +177,15 @@ Telegram ──getUpdates (polling)──▶ auth ──▶ General: abre un tem
 - **Dónde vive el código:** en su propio repo, `MuunganoRT/muungano-bot` (`Muungano/muungano-bot/` en local), desde el
   2026-10-06; antes estaba en `muungano-server/bot/`. **Solo tiene `main` y ahí se sube directo**, sin rama `dev`
   (decisión de Alex, 2026-10-06). En `muungano-server` queda solo lo que es del paquete de Cloudron: `supervisor/bot.conf` y la regla de Apache.
-- **Arranque:** un programa más de supervisor, `muungano-server/supervisor/bot.conf`, junto a `api.conf`, con reinicio
-  automático. El API corre así: `supervisor/api.conf:10` lanza `uvicorn` en `127.0.0.1:8000` con su propio
-  `/app/data/server/.venv` *(verificado)*. El bot vive en `/app/data/bot` con su propio `.venv`.
-- **Despliegue:** por git, igual que el API. En producción `/app/data/server` es un checkout de `main` de
-  `muungano-api` y `/app/data/server-dev` uno de `dev` *(verificado el 2026-10-06: `server` en `a92c465`, `server-dev`
-  en `b8a0daa`, el mismo commit que `origin/dev`)*. El bot irá igual: un checkout de `muungano-bot` en `/app/data/bot`.
-  Lo de "archivo por archivo" es del PHP viejo, no del API.
+- **Arranque:** el programa `bot` de supervisor (`muungano-server/supervisor/bot.conf`, en la imagen desde la 0.1.4),
+  junto a `api` y `api-dev`, con reinicio automático. Corre `/app/data/bot/.venv/bin/python -m duma` como `www-data`.
+  Sin su `.env` sale con código 2 y supervisor lo deja en FATAL sin afectar al API.
+- **Despliegue:** automático, igual que el API. Un push a `main` de `muungano-bot` corre el CI
+  (`.github/workflows/ci.yml`): pruebas, también contra Postgres, y luego `POST https://api.muungano.mx/deploy/bot` con
+  el secreto `DEPLOY_TOKEN`. El receptor (`/app/data/deploy/main.py`, puerto 8002) ejecuta
+  `/app/data/deploy/deploy_bot.sh`: `git pull` en `/app/data/bot`, `pip install -e '.[voice]'` y
+  `supervisorctl restart bot`. Ese script vive solo en el servidor. El API hace lo mismo con `/deploy/dev` y
+  `/deploy/main` sobre `/app/data/server-dev` y `/app/data/server`.
 - **Dónde guarda su estado:** sesiones y confirmaciones pendientes en PostgreSQL, esquema `duma` (`duma/database.py`).
   La conexión sale de `BOT_DATABASE_URL` y, si no está, de `CLOUDRON_POSTGRESQL_URL`, la que Cloudron ya le pone a la
   app: **en producción no hay que configurar nada**. Sin ninguna de las dos cae a un archivo SQLite en `state/` y lo
@@ -391,6 +457,7 @@ siempre en tabla"):
 
 ```
 muungano-bot/                      # repo propio (solo main)
+├── .github/workflows/ci.yml       # pruebas y despliegue al hacer push a main
 ├── PLAN.md
 ├── env.example                    # plantilla sin valores; se copia a .env
 ├── .gitignore                     # .env, state/
@@ -423,7 +490,8 @@ muungano-bot/                      # repo propio (solo main)
 │   ├── asistente-que-puede-y-no-puede.html   # fuente del PDF para el cliente
 │   └── asistente-que-puede-y-no-puede.pdf
 ├── state/                         # fuera de git
-│   ├── bot.sqlite                 # solo sin BOT_DATABASE_URL: sesiones y confirmaciones
+│   ├── bot.sqlite                 # solo sin base de datos configurada: sesiones y confirmaciones
+│   ├── whisper/                   # el modelo de voz, descargado al arrancar
 │   ├── preferencias.md            # reglas permanentes que piden los admins (sección 6c)
 │   ├── budget.json                # gasto del día
 │   └── audit.log
@@ -466,7 +534,7 @@ Solo nombres. Los valores nunca van en el repo ni en el chat.
 
 ## 10. Fases
 
-Todo lo marcado está hecho **en local, sin commit y sin desplegar** (el despliegue es la sección 12). "Probado en el
+Todo lo marcado está hecho y con commit; qué está desplegado y qué no, en la sección 12. "Probado en el
 grupo" quiere decir que Alex lo vio funcionar en Telegram; lo demás solo tiene pruebas automáticas (224, con valores
 falsos; 9 de ellas corren contra Postgres y se saltan si no hay uno) o la prueba contra el API local que se indica.
 
@@ -478,6 +546,7 @@ falsos; 9 de ellas corren contra Postgres y se saltan si no hay uno) o la prueba
 - [x] `POST /assistant/athletes/query` con los filtros `event`, `paid`, `group`, `workouts`
 - [x] `POST /assistant/athletes/aggregate` (cuántos, pagos, entrenos, km, score)
 - [x] `tests/test_assistant.py`
+- [x] Commit en `dev` de `muungano-api` (`7d3e903` y dos arreglos de pruebas) y en `main` por el PR #30 (`537b8a4`)
 - [x] Regla de Apache que cierra `/assistant` hacia internet (`muungano-server/apache/app.conf`)
 - [x] Bot y grupo creados en Telegram
 - [ ] Más filtros, según lo que pidan los admins
@@ -555,10 +624,7 @@ modelo encima de ellas pueden fallar.
 
 ## 11. Pendientes técnicos (míos, sin decisión del cliente)
 
-- **Entorno Python:** resuelto. El API corre con su propio `/app/data/server/.venv` (`supervisor/api.conf:10`) y el
-  contenedor trae además `/usr/bin/python3` (3.12.3) con `anthropic` 1.4.0 *(verificado en producción)*. El bot
-  tendrá su propio `.venv` en `/app/data/bot/.venv`, con sus dependencias en su `pyproject.toml`, sin tocar las del API.
-  Falta crearlo en el contenedor.
+- **Entorno Python:** resuelto y creado en el servidor: `/app/data/bot/.venv`, con `--system-site-packages`.
 - **Dirección del API desde el bot:** resuelta. `BOT_API_URL=http://127.0.0.1:8000` (API de producción) o
   `http://127.0.0.1:8001` (API de pruebas, `server-dev`), según `supervisor/api.conf` y `supervisor/api-dev.conf`.
 - **Correo masivo:** el remitente es `smtp_username` y la bandeja del equipo es una cuenta de Gmail
@@ -590,39 +656,48 @@ modelo encima de ellas pueden fallar.
 
 ---
 
-## 12. Pendiente en producción (al final, lo sube Alex)
+## 12. Producción: qué está desplegado y qué falta
 
-Nada de esto está desplegado. El API se despliega por git: commit en `dev`, `git pull` en `/app/data/server-dev` para
-probar bajo `/test`, merge a `main` y `git pull` en `/app/data/server`, y reiniciar el programa en supervisor. Lo del
-API de esta lista está sin commit en `muungano-api`.
+Estado al 2026-10-06, medido en el servidor.
 
-1. **Regla de Apache** — `muungano-server/apache/app.conf`. En producción el archivo vivo es
-   `/app/data/apache/app.conf` y **`start.sh:10` solo lo copia si no existe**, así que el cambio del repo no llega solo:
-   hay que pegarlo en el servidor. Bloque, justo después de las dos líneas `RequestHeader`:
+**Hecho:**
+- [x] Imagen `adestech/muungano-api:0.1.4` en Cloudron, con `supervisor/bot.conf`. Las librerías de Python de la
+      imagen quedaron fijas en `muungano-server/python-constraints.txt` (las 66 de la 0.1.3): sin eso, reconstruir
+      por cualquier motivo le cambiaba FastAPI y SQLAlchemy al API, que las hereda. Verificado: la 0.1.4 trae las mismas.
+- [x] `muungano-bot` clonado en `/app/data/bot` (rama `main`), con su `.venv` (`--system-site-packages`, extra
+      `voice`) y `anthropic` 1.11 dentro del venv; la del sistema es 1.4.
+- [x] `/app/data/bot/.env`, sin `BOT_DATABASE_URL`: Duma toma `CLOUDRON_POSTGRESQL_URL` y creó el esquema `duma`. Ahí
+      comparte usuario con el API; lo avisa al arrancar ("can read 22 table(s) outside schema duma").
+      `BOT_API_URL=http://127.0.0.1:8000`: va directo al API de producción, sin pasar por el de pruebas (decisión de
+      Alex; las rutas solo leen).
+- [x] Regla de Apache que cierra `/assistant` y `/test/assistant` hacia internet, pegada por Alex en
+      `/app/data/apache/app.conf`. `start.sh` no pisa ese archivo si ya existe, así que la plantilla de la imagen no
+      llega sola.
+- [x] Despliegue automático del bot por CI (sección 2).
+- [x] Duma arranca: conecta a Telegram, ve el grupo, tiene el modelo de voz y su base.
+- [x] Rutas `/assistant/*` en `dev` de `muungano-api` (commit `7d3e903`).
 
-   ```apache
-   # ── Duma, the Telegram assistant ──────────────────────────────────
-   <LocationMatch "(?i)^(/test)?/assistant(/|$)">
-       Require all denied
-   </LocationMatch>
-   ```
+- [x] El CI desplegó las rutas en `server-dev` (`7275ae8`), tras dos arreglos a las pruebas del asistente, que
+      fallaban en GitHub por firmar un token al importarse y por crear carpetas bajo `/app` (sección 0).
+- [x] PR #30 de `dev` a `main` en `muungano-api`: el API de producción está en `537b8a4` y tiene las rutas.
+- [x] `ASSISTANT_TOKEN` en el API de producción: Duma se autentica y las tres rutas le contestan.
+- [x] Desde fuera, `https://api.muungano.mx/assistant/athletes?q=ana` da **403**, y `/test/assistant/…` también.
 
-   Probada el 2026-10-02 en un contenedor con la imagen `muungano-server:test` y dos servidores de prueba en `:8000` y
-   `:8001`: `/assistant`, `/assistant/…`, `/test/assistant/…`, `//assistant`, `/%61ssistant`, `/x/../assistant` y las
-   variantes en mayúsculas dan **403**; `/assistants`, `/v2/users` y `/test/v2/users` siguen yendo a su destino.
-   Después de pegarla: `apache2 -t` y reiniciar el programa `apache` de supervisor *(no probado en producción)*.
-2. **`ASSISTANT_TOKEN`** en el `.env` del API de producción (`/app/data/server`) y en el del API de pruebas
-   (`/app/data/server-dev`), con el mismo valor que `BOT_API_TOKEN` del bot. Mínimo 32 caracteres.
-3. **Código del API:** commit en `dev` de `config.py`, `security.py`, `main.py`, `routers/assistant.py` y sus pruebas;
-   `git pull` en `/app/data/server-dev` y reiniciar `api-dev` para probar; luego merge a `main`, `git pull` en
-   `/app/data/server` y reiniciar `api`.
-4. **El bot:** `git clone` de `muungano-bot` en `/app/data/bot`, su `.venv` (`pip install -e '.[voice]'` para incluir las
-   notas de voz), y `supervisor/bot.conf`. Para la base no hay que poner nada en su `.env`: toma
-   `CLOUDRON_POSTGRESQL_URL` del entorno, igual que el API toma sus `CLOUDRON_POSTGRESQL_*`, y crea solo el esquema
-   `duma` y sus dos tablas. Ahí comparte usuario con el API (sección 2). *Sin verificar:* que supervisor le pase esa
-   variable al programa del bot; si no llegara, Duma lo dice al arrancar y usa SQLite.
-5. **Comprobar desde fuera**, con el API ya desplegado: `curl -s -o /dev/null -w '%{http_code}' https://api.muungano.mx/assistant/athletes?q=ana`
-   debe dar **403**. Desde dentro del contenedor, `127.0.0.1:8000/assistant/athletes?q=ana` con el token debe dar 200.
+**Falta:**
+- [ ] Probar a Duma en el grupo contra el API real (sección 0, punto 1).
+- [ ] Commit en `muungano-server` de la 0.1.4 (manifiesto, `Dockerfile`, `python-constraints.txt`, `bot.conf` y la
+      regla de Apache): la imagen ya corre, pero el repo no la refleja.
+
+**Cómo se reconstruye el paquete de Cloudron** (reconstruido de lo que había, no estaba escrito):
+1. Subir `"version"` en `muungano-server/CloudronManifest.json`.
+2. `docker build --platform linux/amd64 -t adestech/muungano-api:<versión> .` (el servidor es x86; sin `--pull`, salvo
+   que se quiera la base nueva a propósito).
+3. `docker push adestech/muungano-api:<versión>`.
+4. `cloudron update --app api.muungano.mx --image adestech/muungano-api:<versión>`: respalda, reinicia el contenedor y
+   el API se cae unos segundos. La 0.1.4 tardó 3 minutos con el respaldo.
+
+**Ver los logs del bot:** `cloudron logs --app api.muungano.mx --lines 300 | grep -iE 'duma|bot'`. Solo puede correr
+**un** Duma por token: con el del servidor prendido, no arrancar otro en local con el mismo bot (`409 Conflict`).
 
 ---
 
