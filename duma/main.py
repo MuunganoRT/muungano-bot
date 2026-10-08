@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import logging
 import sys
 import time
@@ -13,7 +14,7 @@ from duma.agent import Agent, AnthropicLLM, Session
 from duma.api_client import ApiError, MuunganoApi
 from duma.audit import Audit
 from duma.auth import decide
-from duma import confirmations, media, voice
+from duma import confirmations, hooks, media, voice
 from duma.budget import Budget
 from duma.config import ConfigError, Settings, load
 from duma.database import Database, DatabaseError, PostgresDatabase, SqliteDatabase
@@ -22,7 +23,7 @@ from duma.preferences import Preferences
 from duma.render import _day_year
 from duma.sessions import SessionStore
 from duma.telegram_api import Telegram, TelegramError
-from duma.tools import OutFile, Toolbox, parse_choice
+from duma.tools import OutFile, Toolbox, application_card, parse_choice
 from duma.usage import PRICES, Usage, cost_usd
 
 log = logging.getLogger("duma")
@@ -58,6 +59,14 @@ BUDGET_REACHED = "Con esta respuesta se alcanzó el tope de hoy (${limit:.2f} US
 NO_PREFS = "No hay reglas permanentes guardadas. Pídeme una con algo como «siempre que te pida X, mándalo así»."
 FORGET_NEEDS_NUMBER = "Dime cuál con su número, por ejemplo /forget 2. La lista sale con /prefs."
 NOT_YOURS = "Solo quien lo pidió puede decidir."
+WAITING = "Por seguridad, esta acción se ejecutará en {seconds} segundos."
+STOPPED = "Cancelado: no se hizo nada."
+TOO_LATE = "Ya se ejecutó o ya no está vigente."
+NOTICE_TOPIC = "Solicitudes"
+# A card Duma posts on its own waits for as long as the application may.
+NOTICE_TTL_S = 60 * 24 * 3600
+# Who the API's log says asked when it was a hook and no admin.
+HOOK_CALLER = 0
 # The kinds of pending action that end in `Bot._decide_receipt`.
 RECEIPT_KINDS = ("receipt", "receipt_reject")
 NO_LONGER_VALID = "Esto ya se decidió o ya no está vigente."
@@ -101,6 +110,8 @@ def _keyboard(buttons: Optional[list[tuple[str, str]]]) -> Optional[dict[str, An
     # Guardar/Cancelar sit side by side; the options of a question go one under another, so their text fits.
     if any(parse_choice(data) for _, data in buttons):
         return {"inline_keyboard": [[cell] for cell in cells]}
+    if any(confirmations.parse_application(data) for _, data in buttons):
+        return {"inline_keyboard": [cells[:-1], cells[-1:]]}
     if any(confirmations.parse_receipt(data) for _, data in buttons):
         # The plans share a row; each way out of approving gets its own.
         plans = [cell for cell in cells if cell["callback_data"].split(":")[1][:1] == "a"]
@@ -164,6 +175,19 @@ def topic_link(chat_id: int, thread_id: int) -> str:
     return f"https://t.me/c/{internal}/{thread_id}"
 
 
+@dataclass
+class Countdown:
+    """A decision that was clicked and has not run yet."""
+
+    task: asyncio.Task
+    # The call that will write to the API; never started if it is called off.
+    run: Any
+    user_id: int
+    summary: str
+    # The card's own buttons, to put them back.
+    keyboard: Optional[dict[str, Any]]
+
+
 class Bot:
     def __init__(
         self,
@@ -186,6 +210,8 @@ class Bot:
         self._api = api
         self._budget = budget
         self._confirmations = confirmations
+        self._countdowns: dict[str, Countdown] = {}
+        self._notices = settings.state_dir / "solicitudes.topic"
         self._preferences = preferences
         self._s = settings
         self._tg = telegram
@@ -354,12 +380,17 @@ class Bot:
         await self._on_message(message)
 
     async def _on_button(self, query: dict[str, Any]) -> None:
-        """A click on Guardar/Cancelar. This, and nothing the model says, is what runs an action."""
+        """A click on a button of a proposal. This, and nothing the model says, is what runs an action."""
         choice = parse_choice(query.get("data", ""))
         if choice is not None:
             await self._on_choice(query, *choice)
             return
-        on_card = confirmations.parse_receipt(query.get("data", ""))
+        stopped = confirmations.parse_stop(query.get("data", ""))
+        if stopped is not None:
+            await self._on_stop(query, stopped)
+            return
+        on_application = confirmations.parse_application(query.get("data", ""))
+        on_card = confirmations.parse_receipt(query.get("data", "")) or on_application
         parsed = on_card or confirmations.parse(query.get("data", ""))
         if parsed is None or self._confirmations is None:
             await self._tg.answer_callback_query(query["id"])
@@ -372,30 +403,98 @@ class Bot:
             return
 
         who = (query["from"].get("first_name") or "").strip() or "un administrador"
+        shown = query.get("message") or {}
+        run = None
         if status == "ok" and verb in (confirmations.CANCEL, confirmations.CLOSE):
             outcome = "Sigue pendiente." if on_card else "Cancelado."
+        elif status == "ok" and (pending.kind == "application") != bool(on_application):
+            # A button of one kind of card pointing at a proposal of another: nothing of ours sends that.
+            outcome = NO_LONGER_VALID
+        elif status == "ok" and pending.kind == "application":
+            run = self._decide_application(pending.payload["athlete"], verb, user_id, who)
         elif status == "ok" and pending.kind in RECEIPT_KINDS:
             choice = confirmations.decision(verb) if on_card else pending.payload["decision"]
-            outcome = await self._decide_receipt(pending.payload["receipt"], choice, user_id, who)
+            run = self._decide_receipt(pending.payload["receipt"], choice, user_id, who)
         elif status == "ok" and pending.kind == "announcement":
-            outcome = await self._send_announcement(pending.payload, user_id, who)
+            run = self._send_announcement(pending.payload, user_id, who)
         elif status == "ok":
             outcome = self._execute(pending.kind, pending.payload, user_id)
         else:
             outcome = EXPIRED if status == "expired" else NO_LONGER_VALID
-        self._audit.log(
-            "confirmation", user=user_id, action=action_id, kind=pending.kind if pending else None, verb=verb,
-            status=status, receipt=pending.payload.get("receipt") if pending else None,
-        )
-        await self._tg.answer_callback_query(query["id"], outcome)
 
+        def audit(result: str) -> None:
+            self._audit.log(
+                "confirmation", user=user_id, action=action_id, kind=pending.kind if pending else None, verb=verb,
+                status=result, receipt=pending.payload.get("receipt") if pending else None,
+            )
+
+        async def rewrite(text: str, keyboard: Optional[dict[str, Any]] = None) -> None:
+            if not shown.get("message_id"):
+                return
+            try:
+                await self._tg.edit_message_text(shown["chat"]["id"], shown["message_id"], text, keyboard)
+            except TelegramError as exc:
+                log.info("could not rewrite a decided proposal: %s", exc)
+
+        delay = self._s.action_delay_s
+        if run is not None and delay > 0 and shown.get("message_id"):
+            # What writes to the API waits, with a way out: a slip of the finger costs nothing.
+            pressed = next(
+                (
+                    cell.get("text")
+                    for row in (shown.get("reply_markup") or {}).get("inline_keyboard") or []
+                    for cell in row
+                    if cell.get("callback_data") == query.get("data")
+                ),
+                None,
+            )
+
+            async def later() -> None:
+                await asyncio.sleep(delay)
+                if self._countdowns.pop(action_id, None) is None:
+                    return
+                result = await run
+                audit("ok")
+                await rewrite(f"{pending.summary}\n\n{result}")
+
+            self._countdowns[action_id] = Countdown(asyncio.create_task(later()), run, user_id, pending.summary, shown.get("reply_markup"))
+            await self._tg.answer_callback_query(query["id"], WAITING.format(seconds=delay))
+            chosen = f"{who}: «{pressed}». " if pressed else ""
+            await rewrite(
+                f"{pending.summary}\n\n{chosen}{WAITING.format(seconds=delay)}",
+                _keyboard([("Cancelar", f"{confirmations.STOP}:{action_id}")]),
+            )
+            return
+
+        if run is not None:
+            outcome = await run
+        audit(status)
+        await self._tg.answer_callback_query(query["id"], outcome)
+        if status != "gone":  # else it was already rewritten by the click that decided it
+            await rewrite(f"{pending.summary}\n\n{outcome}")
+
+    async def _on_stop(self, query: dict[str, Any], action_id: str) -> None:
+        """Cancelar on a decision that is waiting to run: nothing happens and the card is as it was."""
+        waiting = self._countdowns.get(action_id)
+        if waiting is None or self._confirmations is None:
+            await self._tg.answer_callback_query(query["id"], TOO_LATE)
+            return
+        if waiting.user_id != query["from"]["id"]:
+            await self._tg.answer_callback_query(query["id"], NOT_YOURS)
+            return
+        del self._countdowns[action_id]
+        waiting.task.cancel()
+        waiting.run.close()
+        await self._confirmations.release(action_id)
+        self._audit.log("confirmation", user=waiting.user_id, action=action_id, verb=confirmations.STOP, status="stopped")
+        await self._tg.answer_callback_query(query["id"], STOPPED)
         shown = query.get("message") or {}
-        if status == "gone" or not shown.get("message_id"):
-            return  # already rewritten by the click that decided it
+        if not shown.get("message_id"):
+            return
         try:
-            await self._tg.edit_message_text(shown["chat"]["id"], shown["message_id"], f"{pending.summary}\n\n{outcome}")
+            await self._tg.edit_message_text(shown["chat"]["id"], shown["message_id"], waiting.summary, waiting.keyboard)
         except TelegramError as exc:
-            log.info("could not rewrite a decided proposal: %s", exc)
+            log.info("could not restore a proposal: %s", exc)
 
     async def _on_choice(self, query: dict[str, Any], asked: int, index: int) -> None:
         """A click on an option of a question: the same as the admin typing that option in that topic."""
@@ -441,6 +540,58 @@ class Bot:
         until = (done.get("data") or {}).get("cubierto_hasta")
         covered = f", cubierto hasta {_day_year(until)}" if until else ""
         return f"Aprobado por {who}: {months} {'mes' if months == 1 else 'meses'}{covered}."
+
+    async def on_hook(self, event: str, data: dict[str, Any]) -> None:
+        """Something the API says just happened. Today: a signup whose questionnaire was just answered."""
+        if event != "application" or self._api is None or self._confirmations is None:
+            return
+        athlete_id = data.get("athlete_id")
+        if isinstance(athlete_id, bool) or not isinstance(athlete_id, int):
+            return
+        found = await self._api.get(f"/assistant/applications/{athlete_id}", telegram_user_id=HOOK_CALLER)
+        application = found["application"]
+        card = application_card(application)
+        action_id = await self._confirmations.propose(
+            confirmations.ANYONE, "application", {"athlete": athlete_id}, card, ttl_s=NOTICE_TTL_S
+        )
+        keyboard = _keyboard(confirmations.application_buttons(action_id, application["questionnaire"]))
+        chat_id = self._s.admin_chat_id
+        self._audit.log("hook", what=event, athlete=athlete_id)
+        try:
+            await self._tg.send_message(chat_id, card, await self._notice_topic(chat_id), keyboard)
+        except TelegramError:
+            # The topic was deleted by hand: open another and remember that one.
+            self._notices.unlink(missing_ok=True)
+            await self._tg.send_message(chat_id, card, await self._notice_topic(chat_id), keyboard)
+
+    async def _notice_topic(self, chat_id: int) -> Optional[int]:
+        """The topic where applications are posted: opened once and remembered across restarts."""
+        try:
+            return int(self._notices.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            pass
+        try:
+            thread_id = await self._tg.create_forum_topic(chat_id, NOTICE_TOPIC)
+        except TelegramError as exc:
+            log.warning("could not open the %s topic (%s); posting in General", NOTICE_TOPIC, exc)
+            return None
+        self._notices.parent.mkdir(parents=True, exist_ok=True)
+        self._notices.write_text(str(thread_id), encoding="utf-8")
+        return thread_id
+
+    async def _decide_application(self, athlete_id: int, code: str, user_id: int, who: str) -> str:
+        """Accept, wait-list or reject a signup in the API, as the admin who pressed the button."""
+        if self._api is None:
+            return NO_LONGER_VALID
+        action, done = confirmations.APPLICATION_ACTIONS[code]
+        try:
+            await self._api.write(
+                f"/assistant/applications/{athlete_id}/decide", telegram_user_id=user_id, json={"action": action}
+            )
+        except ApiError as exc:
+            log.warning("deciding application %s failed: API status %s: %s", athlete_id, exc.status, exc.message)
+            return f"No se pudo: {exc.message}"
+        return f"{done} por {who}. Se le avisa por correo."
 
     async def _send_announcement(self, payload: dict[str, Any], user_id: int, who: str) -> str:
         """Hand an announcement to the API, for the list fixed when it was proposed. The API sends it afterwards."""
@@ -769,6 +920,11 @@ async def amain() -> int:
             transcriber=transcriber,
         )
         await bot.check()
+        if settings.hook_port:
+            try:
+                await hooks.serve(settings.hook_port, settings.api_token, bot.on_hook)
+            except OSError as exc:
+                log.warning("not listening for the API's hooks on port %d: %s", settings.hook_port, exc)
         await bot.run()
     finally:
         await telegram.aclose()

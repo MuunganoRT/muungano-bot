@@ -24,6 +24,8 @@ ALLOWED = (
     ("GET", re.compile(r"^/assistant/athletes/\d+/(payments|plan|profile)$")),
     ("GET", re.compile(r"^/assistant/receipts$")),
     ("GET", re.compile(r"^/assistant/receipts/\d+$")),
+    ("GET", re.compile(r"^/assistant/applications$")),
+    ("GET", re.compile(r"^/assistant/applications/\d+$")),
     ("GET", re.compile(r"^/assistant/garmin/errors$")),
     ("GET", re.compile(r"^/assistant/messages$")),
     ("POST", re.compile(r"^/assistant/athletes/query$")),
@@ -38,6 +40,7 @@ FILES = (("GET", re.compile(r"^/assistant/receipts/\d+/file$")),)
 WRITES = (
     ("POST", re.compile(r"^/assistant/receipts/\d+/decide$")),
     ("POST", re.compile(r"^/assistant/messages$")),
+    ("POST", re.compile(r"^/assistant/applications/\d+/decide$")),
 )
 
 

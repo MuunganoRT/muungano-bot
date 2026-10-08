@@ -12,6 +12,7 @@ class FakeTelegram:
         self.sent, self.actions, self.left, self.created, self.forwarded = [], [], [], [], []
         self.documents, self.keyboards, self.popups, self.edits = [], [], [], []
         self.photos = []
+        self.edit_keyboards = []
         self.albums = []
         self.closed, self.undeletable = [], set()
         self.files = {"voz1": b"OggS fake", "csv1": "Nombre,Grupo\nAna,Maratón\n".encode(), "png1": b"\x89PNG fake"}
@@ -26,8 +27,9 @@ class FakeTelegram:
     async def answer_callback_query(self, callback_query_id, text=""):
         self.popups.append(text)
 
-    async def edit_message_text(self, chat_id, message_id, text):
+    async def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
         self.edits.append((message_id, text))
+        self.edit_keyboards.append(reply_markup)
 
     async def close_forum_topic(self, chat_id, thread_id):
         if thread_id in self.undeletable:
@@ -1157,3 +1159,145 @@ async def test_a_send_the_api_refuses_says_why(settings, tmp_path):
     action = await store.propose(10, "announcement", ANNOUNCEMENT, "Aviso")
     await bot.handle(click(f"ok:{action}"))
     assert tg.edits[-1] == (900, "Aviso\n\nNo se envió: Tu Telegram no está ligado a un usuario de la consola")
+
+
+# ── Applications: the click decides ───────────────────────────────────
+
+
+async def test_a_click_on_an_application_card_decides_it_once(settings, tmp_path):
+    api = SendingApi({"success": True, "action": "accept"})
+    bot, tg, store, _ = await with_preferences(settings, tmp_path)
+    bot._api = api
+    action = await store.propose(10, "application", {"athlete": 31}, "Solicitud de Nora Nueva")
+
+    await bot.handle(named(click(f"ap:a:{action}")))
+    assert api.writes == [("/assistant/applications/31/decide", 10, {"action": "accept"})]
+    assert tg.edits == [(900, "Solicitud de Nora Nueva\n\nAceptada por Adrián. Se le avisa por correo.")]
+    await bot.handle(click(f"ap:r:{action}"))
+    assert len(api.writes) == 1
+
+    other = await store.propose(10, "application", {"athlete": 32}, "Solicitud de Omar")
+    await bot.handle(click(f"ap:x:{other}"))
+    assert len(api.writes) == 1 and tg.edits[-1] == (900, "Solicitud de Omar\n\nSigue pendiente.")
+
+    # A button of another kind of card cannot decide an application, nor the other way round.
+    third = await store.propose(10, "application", {"athlete": 33}, "Solicitud")
+    await bot.handle(click(f"rc:a3:{third}"))
+    receipt = await store.propose(10, "receipt", {"receipt": 6}, "Comprobante #6")
+    await bot.handle(click(f"ap:a:{receipt}"))
+    assert len(api.writes) == 1
+
+    rows = main_module._keyboard([("Aceptar", "ap:a:z"), ("Lista de espera", "ap:w:z"), ("Rechazar", "ap:r:z"), ("Dejar pendiente", "ap:x:z")])
+    assert [len(row) for row in rows["inline_keyboard"]] == [3, 1]
+
+
+# ── A decision waits before it runs, and can be called off ────────────
+
+
+async def test_a_decision_waits_and_cancelar_puts_the_card_back(settings, tmp_path):
+    import asyncio
+    import dataclasses
+
+    api = SendingApi({"success": True, "action": "accept"})
+    bot, tg, store, _ = await with_preferences(dataclasses.replace(settings, action_delay_s=1), tmp_path)
+    bot._api = api
+    action = await store.propose(10, "application", {"athlete": 31}, "Solicitud de Nora Nueva")
+    card = {"inline_keyboard": [[{"text": "Aceptar", "callback_data": f"ap:a:{action}"}]]}
+
+    def press(data, user=10):
+        update = named(click(data, user=user))
+        update["callback_query"]["message"]["reply_markup"] = card
+        return update
+
+    await bot.handle(press(f"ap:a:{action}"))
+    assert api.writes == []
+    assert tg.edits[-1] == (
+        900, "Solicitud de Nora Nueva\n\nAdrián: «Aceptar». Por seguridad, esta acción se ejecutará en 1 segundos."
+    )
+    assert tg.edit_keyboards[-1] == {"inline_keyboard": [[{"text": "Cancelar", "callback_data": f"stop:{action}"}]]}
+
+    await bot.handle(press(f"stop:{action}", user=20))
+    assert tg.popups[-1] == main_module.NOT_YOURS
+    await bot.handle(press(f"stop:{action}"))
+    assert tg.popups[-1] == main_module.STOPPED
+    # The card is back with its own buttons and can be decided again.
+    assert tg.edits[-1] == (900, "Solicitud de Nora Nueva") and tg.edit_keyboards[-1] == card
+    await asyncio.sleep(1.2)
+    assert api.writes == []
+
+    await bot.handle(press(f"ap:a:{action}"))
+    await asyncio.sleep(1.2)
+    assert api.writes == [("/assistant/applications/31/decide", 10, {"action": "accept"})]
+    assert tg.edits[-1] == (900, "Solicitud de Nora Nueva\n\nAceptada por Adrián. Se le avisa por correo.")
+    await bot.handle(press(f"stop:{action}"))
+    assert tg.popups[-1] == main_module.TOO_LATE and len(api.writes) == 1
+
+
+# ── A new application arrives from the API and Duma posts it ──────────
+
+
+class ApplicationsApi(SendingApi):
+    async def get(self, path, *, telegram_user_id, params=None):
+        self.reads = [*getattr(self, "reads", []), (path, telegram_user_id)]
+        return {"success": True, "application": {
+            "id": 31, "name": "Nora Nueva", "status": "awaiting_coach", "questionnaire": True, "requested": "2026-10-01",
+            "city": "Nuevo León", "gender": "Femenino", "age": 34, "comment": None,
+        }}
+
+
+async def test_a_new_application_is_posted_in_its_topic_and_any_admin_can_decide_it(settings, tmp_path):
+    api = ApplicationsApi({"success": True, "action": "wait"})
+    bot, tg, store, _ = await with_preferences(settings, tmp_path)
+    bot._api = api
+
+    await bot.on_hook("application", {"athlete_id": 31})
+    await bot.on_hook("application", {"athlete_id": 31})
+    await bot.on_hook("application", {"athlete_id": "31"})  # not an id: ignored
+    await bot.on_hook("payment", {"athlete_id": 31})  # not something Duma posts
+    assert api.reads == [("/assistant/applications/31", 0)] * 2
+    # One topic, opened once and reused.
+    assert tg.created == [(ADMIN, "Solicitudes")]
+    topic = tg.sent[0][2]
+    assert [(text.splitlines()[0], thread) for _, text, thread in tg.sent] == [("Solicitud de Nora Nueva", topic)] * 2
+    first, second = tg.keyboards
+    assert [d.split(":")[1] for d in first] == ["a", "w", "r"]
+
+    # Nobody asked for it, so whoever is in the group decides; the second card is its own proposal.
+    await bot.handle(named(click(first[1], user=20), "Lupita"))
+    assert api.writes == [("/assistant/applications/31/decide", 20, {"action": "wait"})]
+    assert tg.edits[-1][1].endswith("En lista de espera por Lupita. Se le avisa por correo.")
+    await bot.handle(click(second[2]))
+    assert len(api.writes) == 2
+
+
+async def test_the_hook_door_takes_only_the_shared_token(tmp_path):
+    import asyncio
+
+    from duma import hooks
+
+    got = []
+
+    async def handle(event, data):
+        got.append((event, data))
+
+    server = await hooks.serve(0, "t" * 40, handle)
+    port = server.sockets[0].getsockname()[1]
+
+    async def post(path, token, body=b'{"athlete_id": 7}'):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(
+            f"POST {path} HTTP/1.1\r\nHost: x\r\nX-Bot-Token: {token}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body
+        )
+        await writer.drain()
+        status = (await reader.readline()).decode().split(" ", 1)[1].strip()
+        writer.close()
+        return status
+
+    assert await post("/hook/application", "wrong") == "401 Unauthorized"
+    assert await post("/other", "t" * 40) == "404 Not Found"
+    assert await post("/hook/application", "t" * 40, b"[1]") == "400 Bad Request"
+    assert got == []
+    assert await post("/hook/application", "t" * 40) == "202 Accepted"
+    await asyncio.sleep(0.05)
+    assert got == [("application", {"athlete_id": 7})]
+    server.close()

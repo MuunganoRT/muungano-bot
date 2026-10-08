@@ -478,6 +478,26 @@ SCHEMAS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "solicitudes",
+        "description": (
+            "Solicitudes de ingreso que nadie ha aceptado: manda al chat la tabla (fecha, nombre, ciudad y si ya "
+            "llenó el cuestionario) y te devuelve las filas con códigos en vez de nombres. `situacion`: `pendiente` "
+            "(por defecto, esperan respuesta), `espera` (lista de espera) o `rechazada`. Para decidir una, "
+            "`revisar_solicitud`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "situacion": {"type": "string", "enum": ["pendiente", "espera", "rechazada"]},
+                "formato": {
+                    "type": "string",
+                    "enum": ["auto", "imagen", "csv"],
+                    "description": "Igual que en `entrenos_atleta`: `imagen` o `csv` solo si el administrador lo pidió.",
+                },
+            },
+        },
+    },
+    {
         "name": "avisos_enviados",
         "description": (
             "Avisos que se mandaron por correo o push desde la consola o desde aquí: manda al chat la tabla con fecha, "
@@ -500,6 +520,23 @@ SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+APPLICATION_SCHEMA: dict[str, Any] = {
+    "name": "revisar_solicitud",
+    "description": (
+        "Manda al chat la tarjeta de una solicitud de ingreso (quién es, de dónde, cuándo la mandó, su comentario y "
+        "si ya llenó el cuestionario) con los botones Aceptar, Lista de espera y Rechazar. Tú no decides: lo hace el "
+        "administrador con los botones, y a la persona se le avisa por correo. Sin argumentos manda la pendiente "
+        "más antigua con el cuestionario contestado («la siguiente»); con `nombre`, la de esa persona. Manda una por llamada. Sin cuestionario no "
+        "se puede aceptar: la tarjeta sale sin ese botón. El grupo y el nivel se asignan después, en la consola."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "nombre": {"type": "string", "description": "Nombre y/o apellido de quien solicitó, o su código ATLETA_NN."},
+        },
+    },
+}
 
 ANNOUNCEMENT_SCHEMA: dict[str, Any] = {
     "name": "proponer_aviso",
@@ -894,6 +931,44 @@ ANNOUNCEMENT_MAX = 3000
 NAMES_ON_CARD = 10
 
 
+APPLICATION_STATUSES = {"pendiente": "pending", "espera": "waiting", "rechazada": "rejected"}
+APPLICATION_COLUMNS = [
+    ("Fecha", 1.6, "left"), ("Nombre", 3.6, "left"), ("Ciudad", 2.6, "left"), ("Cuestionario", 1.8, "left"),
+]
+APPLICATION_STATE = {
+    "signed_up": "sin cuestionario", "awaiting_coach": "espera respuesta", "waiting_list": "en lista de espera",
+    "rejected": "rechazada",
+}
+
+
+def _application_facts(a: dict[str, Any]) -> list[str]:
+    """What the model may know about an application: no name and nothing the person typed."""
+    facts = ["cuestionario contestado" if a["questionnaire"] else "sin cuestionario"]
+    if a["status"] in ("waiting_list", "rejected"):
+        facts.append(APPLICATION_STATE[a["status"]])
+    if a.get("requested"):
+        facts.append(f"solicitó el {a['requested']}")
+    facts += [str(v) for v in (a.get("city"), a.get("gender")) if v]
+    if a.get("age"):
+        facts.append(f"unos {a['age']} años")
+    return facts
+
+
+def application_card(a: dict[str, Any]) -> str:
+    lines = [f"Solicitud de {a['name']}"]
+    where = " · ".join(str(v) for v in (a.get("city"), a.get("gender"), f"unos {a['age']} años" if a.get("age") else None) if v)
+    if where:
+        lines.append(where)
+    if a.get("requested"):
+        lines.append(f"La mandó el {_day_year(a['requested'])}")
+    lines.append("Cuestionario: contestado" if a["questionnaire"] else "Cuestionario: sin contestar (no se puede aceptar todavía)")
+    if a["status"] in ("waiting_list", "rejected"):
+        lines.append(f"Hoy: {APPLICATION_STATE[a['status']]}")
+    if a.get("comment"):
+        lines.append(f"Comentario: «{a['comment']}»")
+    return "\n".join(lines)
+
+
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -1154,7 +1229,7 @@ class Toolbox:
         # Without somewhere to keep proposals and rules, the model is not offered the tool at all.
         self._schemas = SCHEMAS + [PREFERENCE_SCHEMA] if confirmations and preferences else SCHEMAS
         if confirmations:
-            self._schemas = self._schemas + RECEIPT_SCHEMAS + [ANNOUNCEMENT_SCHEMA]
+            self._schemas = self._schemas + RECEIPT_SCHEMAS + [APPLICATION_SCHEMA, ANNOUNCEMENT_SCHEMA]
 
     @property
     def schemas(self) -> list[dict[str, Any]]:
@@ -1181,6 +1256,8 @@ class Toolbox:
             "comprobantes": lambda a, u: self._receipts(a, u, names),
             "revisar_comprobante": lambda a, u: self._review(a, u, names),
             "rechazar_comprobante": lambda a, u: self._propose_rejection(a, u, names),
+            "solicitudes": lambda a, u: self._applications(a, u, names),
+            "revisar_solicitud": lambda a, u: self._review_application(a, u, names),
             "errores_garmin": lambda a, u: self._garmin_errors(a, u, names),
             "avisos_enviados": self._sent_messages,
             "proponer_aviso": lambda a, u: self._propose_announcement(a, u, names),
@@ -1688,6 +1765,102 @@ class Toolbox:
             summary,
             "Propuesta enviada al chat con los botones Rechazar y Cancelar. No está rechazado hasta que pulsen.",
             buttons=confirmations.buttons(action_id, "Rechazar"),
+        )
+
+    async def _applications(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        status = args.get("situacion") or "pendiente"
+        if status not in APPLICATION_STATUSES:
+            raise ValueError("`situacion` must be pendiente, espera or rechazada")
+        layout = _format(args)
+        data = await self._api.get(
+            "/assistant/applications", telegram_user_id=telegram_user_id, params={"status": APPLICATION_STATUSES[status]}
+        )
+        found = data["applications"]
+        what = {"pendiente": "pendiente(s)", "espera": "en lista de espera", "rechazada": "rechazada(s)"}[status]
+        if not found:
+            return ToolResult(None, f"Ninguna solicitud {what}.")
+        names = names if names is not None else Pseudonyms()
+        to_model = f"{data['total']} solicitud(es) {what}, de la más antigua a la más reciente.\n" + "\n".join(
+            f"{names.code(a['id'], a['name'])} | " + " | ".join(_application_facts(a)) for a in found
+        )
+
+        def answered(a: dict[str, Any]) -> str:
+            return "contestado" if a["questionnaire"] else "sin contestar"
+
+        def when(a: dict[str, Any], show: Any) -> str:
+            return show(a["requested"]) if a.get("requested") else ""
+
+        return await self._deliver(
+            layout,
+            "solicitudes",
+            "Solicitudes",
+            f"{data['total']} {what}" if data["total"] != 1 else f"1 {what}",
+            "De la más antigua a la más reciente",
+            APPLICATION_COLUMNS,
+            [
+                [when(a, _day_year) or charts.EMPTY_CELL, _clip(a["name"], NAME_CELL), _clip(a.get("city") or charts.EMPTY_CELL, 18), answered(a)]
+                for a in found
+            ],
+            ["Fecha", "Nombre", "Ciudad", "Género", "Edad aprox.", "Cuestionario", "Comentario"],
+            [
+                [when(a, str), a["name"], a.get("city") or "", a.get("gender") or "", a.get("age") or "", answered(a), a.get("comment") or ""]
+                for a in found
+            ],
+            to_model,
+        )
+
+    async def _review_application(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        names = names if names is not None else Pseudonyms()
+
+        async def listed(status: str) -> list[dict[str, Any]]:
+            data = await self._api.get("/assistant/applications", telegram_user_id=telegram_user_id, params={"status": status})
+            return data["applications"]
+
+        if args.get("nombre"):
+            name = _text(args, "nombre")
+            known = names.athlete_id(name)
+            if known is not None:
+                application = (
+                    await self._api.get(f"/assistant/applications/{known}", telegram_user_id=telegram_user_id)
+                )["application"]
+            else:
+                words = _fold(name).split()
+                hits = [
+                    a for status in ("pending", "waiting", "rejected") for a in await listed(status)
+                    if all(w in _fold(a["name"]) for w in words)
+                ]
+                hits = list({a["id"]: a for a in hits}.values())
+                if not hits:
+                    return ToolResult("No encontré una solicitud abierta con ese nombre.", "Sin resultados; ya se lo dije al administrador.")
+                if len(hits) > 1:
+                    labels = [f"{a['name']} · {APPLICATION_STATE.get(a['status'], a['status'])}" for a in hits]
+                    unique = len(hits) <= MAX_CHOICES and len(set(labels)) == len(labels)
+                    return ToolResult(
+                        "Hay varias solicitudes con ese nombre. ¿Cuál?\n" + "\n".join(f"- {label}" for label in labels),
+                        f"Hay {len(hits)} solicitudes con ese nombre; ya le pregunté al administrador cuál. Espera su respuesta.",
+                        buttons=choice_buttons([_clip(label, CHOICE_LABEL_MAX) for label in labels], telegram_user_id) if unique else None,
+                    )
+                application = hits[0]
+        else:
+            queue = await listed("pending")
+            if not queue:
+                return ToolResult(None, "No hay solicitudes pendientes.")
+            # The oldest one that can be decided; the ones without a questionnaire only when there is nothing else.
+            application = next((a for a in queue if a["questionnaire"]), queue[0])
+
+        card = application_card(application)
+        code = names.code(application["id"], application["name"])
+        seen = f"Solicitud de {code}: " + " | ".join(_application_facts(application)) + "."
+        if application.get("comment"):
+            seen += " Su comentario (texto que escribió) salió al chat; tú no lo ves."
+        if self._confirmations is None:
+            return ToolResult(card, seen + " Salió al chat sin botones.")
+        action_id = await self._confirmations.propose(telegram_user_id, "application", {"athlete": application["id"]}, card)
+        return ToolResult(
+            card,
+            seen + " La tarjeta salió al chat con los botones. Tú no decides: espera a que el administrador pulse. No "
+            "repitas la tarjeta.",
+            buttons=confirmations.application_buttons(action_id, application["questionnaire"]),
         )
 
     async def _garmin_errors(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:

@@ -173,9 +173,14 @@ class Telegram:
             raise TelegramError("download", response.status_code, "file not available")
         return response.content
 
-    async def edit_message_text(self, chat_id: int, message_id: int, text: str) -> None:
-        """Replace a message's text. Sent without a keyboard, so its buttons go away."""
-        await self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text[:MAX_MESSAGE]})
+    async def edit_message_text(
+        self, chat_id: int, message_id: int, text: str, reply_markup: Optional[dict[str, Any]] = None
+    ) -> None:
+        """Replace a message's text. Without a keyboard its buttons go away."""
+        params: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text[:MAX_MESSAGE]}
+        if reply_markup:
+            params["reply_markup"] = reply_markup
+        await self._call("editMessageText", params)
 
     async def send_chat_action(self, chat_id: int, thread_id: Optional[int] = None, action: str = "typing") -> None:
         params: dict[str, Any] = {"chat_id": chat_id, "action": action}

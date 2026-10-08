@@ -19,6 +19,8 @@ SUMMARY = {
 
 
 class FakeApi:
+    signups = None
+
     def __init__(self, athletes, summary=SUMMARY, fail=None):
         self.athletes, self.summary, self.fail = athletes, summary, fail
         self.calls = []
@@ -39,6 +41,10 @@ class FakeApi:
             return self.workouts
         if path.endswith("/laps"):
             return self.laps
+        if path == "/assistant/applications":
+            return {**APPLICATIONS, "applications": [a for a in APPLICATIONS["applications"] if self.signups is None or a["id"] in self.signups]}
+        if path.startswith("/assistant/applications/"):
+            return {"success": True, "application": APPLICATIONS["applications"][0]}
         if path == "/assistant/garmin/errors":
             return self.garmin
         if path == "/assistant/messages":
@@ -1036,6 +1042,62 @@ async def test_a_rejection_with_its_own_reason_is_only_proposed(tmp_path):
     _, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
     assert pending.payload == {"receipt": 6, "decision": {"accion": "rechazar", "motivo": reason}}
     assert (await box.run("rechazar_comprobante", {"comprobante": 6, "motivo": "no"}, 956)).is_error
+
+
+APPLICATIONS = {
+    "success": True,
+    "status": "pending",
+    "total": 2,
+    "truncated": False,
+    "applications": [
+        {"id": 31, "name": "Nora Nueva", "status": "awaiting_coach", "questionnaire": True, "requested": "2026-10-01",
+         "city": "Nuevo León", "gender": "Femenino", "age": 34, "comment": "Vengo de otro club"},
+        {"id": 32, "name": "Omar Nuevo", "status": "signed_up", "questionnaire": False, "requested": "2026-10-03",
+         "city": None, "gender": None, "age": None, "comment": None},
+    ],
+}
+
+
+async def test_the_application_queue_shows_names_in_the_chat_and_codes_to_the_model():
+    from duma.pseudonyms import Pseudonyms
+
+    api, names = FakeApi([]), Pseudonyms()
+    r = await Toolbox(api).run("solicitudes", {"situacion": "espera", "formato": "csv"}, 956, names)
+    assert api.calls[-1][:2] == ("/assistant/applications", {"status": "waiting"})
+    lines = r.files[0].content.decode("utf-8-sig").splitlines()
+    assert lines[1] == "2026-10-01,Nora Nueva,Nuevo León,Femenino,34,contestado,Vengo de otro club"
+    assert "ATLETA_01 | cuestionario contestado | solicitó el 2026-10-01 | Nuevo León" in r.to_model
+    assert "Nora" not in r.to_model and "otro club" not in r.to_model
+    assert (await Toolbox(api).run("solicitudes", {"situacion": "todas"}, 956, names)).is_error
+
+
+async def test_reviewing_an_application_sends_a_card_with_the_consoles_three_buttons(tmp_path):
+    from duma.pseudonyms import Pseudonyms
+
+    api, names = FakeApi([]), Pseudonyms()
+    box, store = await box_with_buttons(api, tmp_path)
+    r = await box.run("revisar_solicitud", {}, 956, names)
+    assert r.direct_text.splitlines() == [
+        "Solicitud de Nora Nueva",
+        "Nuevo León · Femenino · unos 34 años",
+        "La mandó el 1 oct 2026",
+        "Cuestionario: contestado",
+        "Comentario: «Vengo de otro club»",
+    ]
+    assert [label for label, _ in r.buttons] == ["Aceptar", "Lista de espera", "Rechazar", "Dejar pendiente"]
+    assert "Nora" not in r.to_model and "otro club" not in r.to_model and "Tú no decides" in r.to_model
+    status, pending = await store.claim(r.buttons[0][1].split(":")[2], 956)
+    assert (status, pending.kind, pending.payload) == ("ok", "application", {"athlete": 31})
+
+    # Without the questionnaire there is nothing to accept on.
+    r = await box.run("revisar_solicitud", {"nombre": "omar"}, 956, names)
+    assert [label for label, _ in r.buttons] == ["Lista de espera", "Rechazar", "Dejar pendiente"]
+    assert "sin contestar" in r.direct_text
+
+    r = await box.run("revisar_solicitud", {"nombre": "zoe"}, 956, names)
+    assert r.buttons is None and "No encontré" in r.direct_text
+    api.signups = []
+    assert (await box.run("revisar_solicitud", {}, 956, names)).to_model == "No hay solicitudes pendientes."
 
 
 GARMIN = {

@@ -21,6 +21,10 @@ from duma.database import Database
 Status = Literal["ok", "gone", "expired", "not_yours"]
 
 CONFIRM, CANCEL = "ok", "no"
+# The button shown while a decision waits to run.
+STOP = "stop"
+# The owner of a proposal Duma posted on its own: whoever the chat lets click.
+ANYONE = 0
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,32 @@ def decision(code: str) -> Optional[dict[str, Any]]:
     return None
 
 
+APPLICATION = "ap"
+# Button code -> what the API is asked to do, and how the outcome reads.
+APPLICATION_ACTIONS = {"a": ("accept", "Aceptada"), "w": ("wait", "En lista de espera"), "r": ("reject", "Rechazada")}
+
+
+def application_buttons(action_id: str, can_accept: bool) -> list[tuple[str, str]]:
+    """The buttons of an application card: the console's three, and one to leave it as it is."""
+    out = [("Aceptar", f"{APPLICATION}:a:{action_id}")] if can_accept else []
+    out += [("Lista de espera", f"{APPLICATION}:w:{action_id}"), ("Rechazar", f"{APPLICATION}:r:{action_id}")]
+    return [*out, ("Dejar pendiente", f"{APPLICATION}:{CLOSE}:{action_id}")]
+
+
+def parse_application(data: str) -> Optional[tuple[str, str]]:
+    """`ap:a:<id>` -> (`a`, id); None for anything that is not a button of an application card."""
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != APPLICATION or not parts[2]:
+        return None
+    return (parts[1], parts[2]) if parts[1] == CLOSE or parts[1] in APPLICATION_ACTIONS else None
+
+
+def parse_stop(data: str) -> Optional[str]:
+    """`stop:<id>` -> id; None for any other button."""
+    verb, _, action_id = (data or "").partition(":")
+    return action_id if verb == STOP and action_id else None
+
+
 def parse(data: str) -> Optional[tuple[str, str]]:
     """`ok:<id>` -> (`ok`, id); None for anything that is not one of this module's buttons."""
     verb, _, action_id = (data or "").partition(":")
@@ -101,17 +131,24 @@ class Confirmations:
         )
         return cls(db, ttl_s, clock)
 
-    async def propose(self, user_id: int, kind: str, payload: dict[str, Any], summary: str) -> str:
+    async def propose(
+        self, user_id: int, kind: str, payload: dict[str, Any], summary: str, ttl_s: Optional[int] = None
+    ) -> str:
+        """Store a proposal. `user_id` ANYONE is one nobody asked for: any admin may decide it."""
         action_id = secrets.token_urlsafe(12)
         await self._db.execute(
             "INSERT INTO pending (id, user_id, kind, payload, summary, expires_at) VALUES ($1, $2, $3, $4, $5, $6)",
-            action_id, user_id, kind, json.dumps(payload, ensure_ascii=False), summary, self._clock() + self._ttl_s,
+            action_id, user_id, kind, json.dumps(payload, ensure_ascii=False), summary, self._clock() + (ttl_s or self._ttl_s),
         )
         return action_id
 
     async def purge(self, older_than_s: float = 86400) -> None:
         """Forget proposals that expired that long ago: decided or not, nothing can use them any more."""
         await self._db.execute("DELETE FROM pending WHERE expires_at < $1", self._clock() - older_than_s)
+
+    async def release(self, action_id: str) -> None:
+        """Give back a proposal whose decision was called off before it ran: it can be decided again."""
+        await self._db.execute("UPDATE pending SET decided = 0 WHERE id = $1", action_id)
 
     async def claim(self, action_id: str, user_id: int) -> tuple[Status, Optional[Pending]]:
         """Take a proposal to decide it. `ok` is returned once; someone else's click consumes nothing."""
@@ -122,7 +159,7 @@ class Confirmations:
             return "gone", None
         owner, kind, payload, summary, expires_at, decided = rows[0]
         pending = Pending(action_id, owner, kind, json.loads(payload), summary)
-        if owner != user_id:
+        if owner not in (user_id, ANYONE):
             return "not_yours", None
         if decided:
             return "gone", pending

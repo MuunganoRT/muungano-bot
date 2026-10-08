@@ -13,6 +13,8 @@ FAKE_ENV = {
     "BOT_API_URL": "http://api.test/",
     "BOT_API_TOKEN": "t" * 40,
     "ANTHROPIC_API_KEY": "sk-fake-for-tests",
+    "BOT_ACTION_DELAY_S": "0",
+    "BOT_HOOK_PORT": "0",
 }
 
 

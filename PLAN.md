@@ -566,6 +566,8 @@ Solo nombres. Los valores nunca van en el repo ni en el chat.
 | `BOT_SESSION_MAX_TOKENS` | Tokens a los que la sesión se compacta sola (100000) |
 | `BOT_SESSION_IDLE_HOURS` | Horas sin mensajes tras las que Duma cierra un tema y borra su conversación (24; 0 = nunca) |
 | `BOT_CONFIRM_TTL_MIN` | Cuánto dura un botón de confirmar |
+| `BOT_HOOK_PORT` | Puerto en 127.0.0.1 donde el API avisa de una solicitud nueva (8765; 0 = no escucha) |
+| `BOT_ACTION_DELAY_S` | Segundos entre el clic y la escritura en el API, con botón Cancelar (10; 0 = de inmediato) |
 | `BOT_STATE_DIR` | Ruta de `state/` |
 | `BOT_DATABASE_URL` | PostgreSQL donde Duma guarda sesiones y confirmaciones. Vacía: usa `CLOUDRON_POSTGRESQL_URL`; sin ninguna, archivo SQLite en `state/` |
 | `BOT_DATABASE_SCHEMA` | Esquema de Duma en esa base (`duma`) |
@@ -845,8 +847,12 @@ por canal se consulta con `avisos_enviados`.
 El newsletter mensual por atleta (sección 5) es un pedido aparte y está sin desarrollar: ver «Por definir con los
 admins», abajo.
 
-**Después, en este orden:** pago en efectivo (`POST /v2/membership`, `routers/receipts.py:639`), solicitudes nuevas
-(aceptar, lista de espera, rechazar, con grupo y nivel), pausar o reactivar, tiempos de carrera.
+**Fase 3 — solicitudes de ingreso (escrita el 2026-10-07).** `solicitudes` y `revisar_solicitud`; el clic llama a
+`POST /assistant/applications/{id}/decide`, que por dentro es `update_user` de la consola. Grupo y nivel se quedan
+en la consola (su pantalla de solicitudes tampoco los pide).
+
+**Después, en este orden:** renovar membresía (en la consola, «Renovar membresía»: plan, monto recibido, fecha de
+pago y referencia; `POST /v2/membership`, `routers/receipts.py`), pausar o reactivar, tiempos de carrera.
 
 **Fuera:** entrenos y plan, precios y descuentos, archivar y borrar.
 

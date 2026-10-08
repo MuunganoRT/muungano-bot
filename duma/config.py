@@ -40,6 +40,10 @@ class Settings:
     daily_budget_usd: float = 5.0
     # How long a Guardar/Cancelar button stays valid.
     confirm_ttl_min: int = 15
+    # Seconds between a click that writes to the API and the write, with a Cancelar button meanwhile. 0 = at once.
+    action_delay_s: int = 10
+    # Port on 127.0.0.1 where the API tells Duma about new applications. 0 = not listening.
+    hook_port: int = 8765
     # A topic nobody has written in for this long is closed and its sessions deleted. 0 keeps them forever.
     session_idle_hours: int = 24
     # PostgreSQL for sessions and confirmations: BOT_DATABASE_URL, else the one Cloudron gives the app
@@ -125,6 +129,8 @@ def load(env: Optional[Mapping[str, str]] = None, env_file: Optional[Path] = DEF
         session_max_tokens=_int(merged, "BOT_SESSION_MAX_TOKENS", 100_000),
         daily_budget_usd=_float(merged, "BOT_DAILY_BUDGET_USD", 5.0),
         confirm_ttl_min=_int(merged, "BOT_CONFIRM_TTL_MIN", 15),
+        action_delay_s=_int(merged, "BOT_ACTION_DELAY_S", 10),
+        hook_port=_int(merged, "BOT_HOOK_PORT", 8765),
         session_idle_hours=_int(merged, "BOT_SESSION_IDLE_HOURS", 24),
         database_url=(merged.get("BOT_DATABASE_URL") or merged.get("CLOUDRON_POSTGRESQL_URL") or "").strip(),
         database_schema=(merged.get("BOT_DATABASE_SCHEMA") or "duma").strip(),
