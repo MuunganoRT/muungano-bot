@@ -3,7 +3,7 @@
 Estado de lo **implementado y desplegado**. Lo que falta y las decisiones de diseño viven en [PLAN.md](PLAN.md).
 Se actualiza en cada commit: si el código cambia lo que dice este archivo, el mismo commit lo corrige.
 
-Última actualización: 2026-10-07, commit `3b5fbb3`.
+Última actualización: 2026-10-07.
 
 ## Qué es
 
