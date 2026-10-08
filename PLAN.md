@@ -727,6 +727,114 @@ Cambios:
 5. `prompts/system.md`: cuándo pedir `imagen` o `csv`.
 6. Pruebas en `tests/test_tools.py`, `test_charts.py`, `test_telegram_api.py`, `test_main.py`.
 
+### Más rutas de lectura para Duma (fase A escrita el 2026-10-07; fase B sin implementar)
+
+Se descartó darle SQL: las definiciones (activo, fecha de pago, score) viven en Python y el modelo vería nombres y
+contacto. Se amplía `/assistant/*`, que ya es un router aparte con su propio token y reutiliza `routers.reports` y
+`services.membership`. Ninguna ruta nueva devuelve correo, teléfono, contacto de emergencia ni texto libre al modelo.
+
+**Fase A — pagos, plan y perfil**
+
+| Ruta nueva | Contesta | Herramienta |
+|---|---|---|
+| `GET /assistant/receipts` (estado, periodo, beneficio) | comprobantes pendientes, rechazados o aprobados | `comprobantes` |
+| `GET /assistant/athletes/{id}/payments` | historial de pagos y hasta cuándo está cubierto | `pagos_atleta` |
+| `GET /assistant/athletes/{id}/plan` (desde, hasta; admite fechas futuras) | qué le toca y qué no hizo: fecha, tipo, km y tiempo estimados, hecho o no | `plan_atleta` |
+| `GET /assistant/athletes/{id}/profile` | nivel, sede, edad, género, reloj y marca, meta, días de entreno | `perfil_atleta` |
+
+Filtros nuevos en `AthleteQuery`, que sirven a `buscar_atletas`, `cifras`, `consultar` y `grafica`:
+`membership` (vence en un periodo, vencida, vigente), `receipt` (estado, beneficio), `profile` (nivel, sede, género,
+edad, con o sin reloj) y `missed` (al menos N entrenos prescritos sin hacer en un periodo).
+
+**Fase B — operación**
+
+| Ruta nueva | Contesta | Herramienta |
+|---|---|---|
+| `GET /assistant/garmin/errors` (periodo) | a quién no le llegaron entrenos al reloj y por qué | `errores_garmin` |
+| `GET /assistant/messages` (periodo) | avisos enviados y cuántos aceptó cada canal | `avisos` |
+
+Fuera: convenios y notas del calendario (contenido fijo, nadie lo pregunta) y el texto del entreno que escribe el coach.
+
+Orden: API en `dev` con pruebas → CI → `main` → bot (si el bot sube antes, las herramientas nuevas contestan 404).
+Las rutas nuevas viven en `routers/assistant_members.py`; `routers/assistant.py` no se partió porque sus pruebas
+parchan constantes de ese módulo. Los filtros nuevos sí están ahí, en `_resolve`. Las listas salen por
+`Toolbox._deliver` (imagen, CSV o álbum).
+
+Decisiones de la fase A: el filtro de perfil no filtra por edad (la fecha de nacimiento mezcla día/mes y mes/día;
+el perfil da solo «unos N años» por el año). La meta del cuestionario y el motivo de rechazo son texto que escribió
+una persona: salen al chat y al CSV, nunca al modelo. Un beneficio pendiente no trae meses (los elige quien aprueba).
+
+### Escrituras desde Telegram (fase 1 escrita el 2026-10-07; lo demás sin implementar)
+
+Reglas de todas (las de la sección 4, que ya están en código para las preferencias: `duma/confirmations.py`, tabla
+`duma.pending`): nada se ejecuta sin botón, el botón es de un solo uso y caduca, lo mostrado es lo que se ejecuta, y
+queda en `audit.log`. Dos más para escribir en el API:
+
+1. **El modelo no puede escribir.** Las rutas `POST` de escritura van en una lista aparte de `ALLOWED`
+   (`duma/api_client.py`) que solo usa el manejador del botón (`Bot._on_button`, `duma/main.py`). Ninguna herramienta
+   del modelo las alcanza: el modelo arma la tarjeta, el clic del admin ejecuta.
+2. **Quién lo hizo.** Hoy el API solo recibe el id de Telegram para el log (`assistant_caller`, `security.py:266`) y las
+   escrituras de la consola guardan un usuario (`resuelto_por`). `ASSISTANT_ADMINS` (`security.py`) liga el id de
+   Telegram con el usuario de la consola, y el guard `assistant_admin` devuelve ese `User` (admin o coach, no
+   bloqueado) o 403. **Hoy es una constante con una sola persona:** José Adrián, Telegram `8942559308` → usuario 80.
+   Cualquier otro admin del grupo puede pedir la tarjeta, pero su clic contesta «Tu Telegram no está ligado a un
+   usuario de la consola». Cuando se una la segunda persona, pasa al `.env` del API.
+
+**Fase 1 — validar comprobantes**
+
+API (`routers/assistant_members.py`, y `routers/receipts.py` para compartir la lógica):
+
+| Ruta | Qué hace |
+|---|---|
+| `GET /assistant/receipts/{id}` | atleta, plan pedido y precio, lo que leyó la IA (monto, fecha, referencia), cobertura actual y hasta cuándo quedaría con 1, 3 y 6 meses |
+| `GET /assistant/receipts/{id}/file` | la imagen o el PDF. El bot lo manda al chat; al modelo nunca |
+| `POST /assistant/receipts/{id}/decide` | aprobar (con meses) o rechazar (con motivo) |
+
+El cuerpo de `decide` (`routers/receipts.py:526`) se saca a una función que usan la consola y esta ruta: una sola
+implementación de aprobar. Ya rechaza un comprobante resuelto, así que dos admins a la vez no activan dos veces.
+
+Bot: herramienta `revisar_comprobante` (por atleta, por número o «el siguiente pendiente»). Manda la foto con una
+tarjeta —quién, plan pedido, monto leído contra el esperado, cobertura— y botones:
+
+- Los tres planes en una fila, con «Aprobar» en el que pidió: **[1 mes] [Aprobar 3 meses] [6 meses]**.
+- Un botón por motivo de rechazo: ilegible, monto no coincide, no es un comprobante (en beneficio: ilegible y
+  beneficio no válido). El texto que recibe el atleta está fijo en `REJECTIONS` (`duma/confirmations.py`).
+- **[Dejar pendiente]** cierra la tarjeta sin tocar nada.
+- Otro motivo: el admin se lo dice a Duma y `rechazar_comprobante` lo propone con **[Rechazar] [Cancelar]**.
+
+Como quedó: la foto sale primero y la tarjeta después, como texto con los botones (Telegram solo deja reescribir
+texto). La tarjeta es una propuesta de `duma.pending`: un solo uso, caduca y solo la decide quien la pidió. La
+referencia y la fecha leídas del comprobante salen al chat; al modelo solo le llega el monto. `MuunganoApi.write`
+solo acepta las rutas de `WRITES` y solo lo llama `Bot._decide_receipt`.
+
+Al pulsar, el mensaje se edita: «Aprobado por Alex · 3 meses · cubierto hasta 31 dic 2026» y sin botones.
+
+⚠️ Aprobar tiene efectos reales (`_activar`, `routers/receipts.py:684`): activa la membresía, escribe en el MySQL
+viejo, manda correo al atleta y publica sus entrenos pendientes en Garmin. En local esos tres están apagados.
+
+Opcional (1b): Duma avisa en el grupo cuando entra un comprobante nuevo, revisando la cola cada pocos minutos.
+
+**Fase 2 — avisos (correo y push) y newsletter**
+
+La audiencia se dice con los filtros que ya existen y se fija antes de confirmar:
+
+- **Siempre activos.** El API fuerza `member_status: active`; no es un parámetro.
+- **«Todos»** hay que decirlo: sin filtros no se propone nada, Duma pregunta «¿a todos los activos?».
+- **Grupos** por nombre, uno o varios («los de 42k MTY y Berlin»); si el nombre coincide con varios o con ninguno,
+  Duma pregunta con botones (`preguntar`, ya existe). También sirven evento, membresía, perfil y faltas.
+- La tarjeta de confirmación dice **cuántos y quiénes**: «87 atletas activos · grupos 42k MTY 3:45+ y Berlin 4:00hr»,
+  cuántos tienen push y cuántos solo correo, y adjunta la lista en CSV. El texto del aviso va completo.
+- **La lista se congela** al proponer: los ids se guardan en `duma.pending` y el envío usa esos, no vuelve a filtrar.
+
+API: `POST /assistant/messages/preview` (filtros → conteo, alcance por canal, lista) y `POST /assistant/messages`
+(ids, asunto, mensaje, canal), sobre el envío de la consola (`send_message`, `routers/catalog.py:588`). El asunto
+cabe en 45 caracteres (columna `messages.asunto`). El newsletter (sección 5) es este mismo envío con plantilla.
+
+**Después, en este orden:** pago en efectivo (`POST /v2/membership`, `routers/receipts.py:639`), solicitudes nuevas
+(aceptar, lista de espera, rechazar, con grupo y nivel), pausar o reactivar, tiempos de carrera.
+
+**Fuera:** entrenos y plan, precios y descuentos, archivar y borrar.
+
 ---
 
 ## 12. Producción: qué está desplegado y qué falta

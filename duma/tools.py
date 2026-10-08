@@ -6,9 +6,10 @@ a chart drawn by `charts`, and the model gets back only a short acknowledgement
 with no names in it. `cifras`, `catalogo` and `consultar` answer the model:
 with totals, which identify nobody; with the names of groups and events; and
 with one row per person where the name is a code. `entrenos_atleta` and
-`vueltas_entreno` do both: the chat gets a table drawn by `charts` (or a CSV,
-or an album of tables), with the athlete's name on it, and the model gets the
-same figures with no name at all. Either way the model never reads a person's name
+`vueltas_entreno`, `plan_atleta`, `pagos_atleta`, `perfil_atleta` and
+`comprobantes` do both: the chat gets a table drawn by `charts` (or a CSV, an
+album of tables, or a short card), with names on it, and the model gets the
+same figures with no name at all, or with a code in its place. Either way the model never reads a person's name
 it was not given by the admin.
 """
 
@@ -28,7 +29,7 @@ from duma.api_client import ApiError, MuunganoApi
 from duma.confirmations import Confirmations
 from duma.preferences import PreferenceError, Preferences, clean
 from duma.pseudonyms import Pseudonyms
-from duma.render import _day, _day_year, _num, _period, _race_time, matches_csv, render_candidates, render_matches, render_summary, table_csv
+from duma.render import RECEIPT_STATUS, _day, _day_year, _extras, _money, _num, _period, _race_time, matches_csv, render_candidates, render_matches, render_summary, table_csv
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +40,7 @@ class OutFile:
     content: bytes
     # Shown in the chat as a picture instead of attached as a download.
     photo: bool = False
+    mime: str = "image/png"
 
 
 @dataclass
@@ -60,7 +62,29 @@ FILTERS_SCHEMA: dict[str, Any] = {
     "items": {
         "type": "object",
         "properties": {
-            "tipo": {"type": "string", "enum": ["evento", "pago", "grupo", "entrenos"]},
+            "tipo": {
+                "type": "string",
+                "enum": ["evento", "pago", "grupo", "entrenos", "membresia", "comprobante", "perfil", "faltas"],
+                "description": (
+                    "`membresia`: por lo que cubre su membresía (`situacion`). `comprobante`: tiene un comprobante "
+                    "en ese `situacion`. `perfil`: por `nivel`, `sede`, `genero` o `reloj`. `faltas`: dejó sin "
+                    "hacer al menos `minimo` entrenos prescritos entre `desde` y `hasta`."
+                ),
+            },
+            "situacion": {
+                "type": "string",
+                "enum": ["vigente", "vencida", "sin_membresia", "vence", "pendiente", "aprobado", "rechazado"],
+                "description": (
+                    "Para `membresia`: `vigente` (cubre hoy), `vencida`, `sin_membresia` (nunca tuvo) o `vence` "
+                    "(su último día cubierto cae entre `desde` y `hasta`). Para `comprobante`: `pendiente`, "
+                    "`aprobado` o `rechazado`; con `desde` y `hasta` opcionales, que son la fecha en que se subió."
+                ),
+            },
+            "beneficio": {"type": "boolean", "description": "Solo `comprobante`: solo los de beneficio (true) o solo los de pago (false)."},
+            "nivel": {"type": "integer", "description": "Solo `perfil`: nivel del atleta."},
+            "sede": {"type": "string", "description": "Solo `perfil`: parte del nombre de la sede."},
+            "genero": {"type": "string", "enum": ["femenino", "masculino"], "description": "Solo `perfil`."},
+            "reloj": {"type": "boolean", "description": "Solo `perfil`: con reloj vinculado (true) o sin él (false)."},
             "nombre": {
                 "type": "string",
                 "description": "Para `evento` y `grupo`: parte del nombre, mínimo 2 letras.",
@@ -84,9 +108,9 @@ FILTERS_SCHEMA: dict[str, Any] = {
                 ),
             },
             "anio": {"type": "integer", "description": "Solo `evento`: año de la edición."},
-            "desde": {"type": "string", "description": "Para `pago` y `entrenos`: YYYY-MM-DD."},
-            "hasta": {"type": "string", "description": "Para `pago` y `entrenos`: YYYY-MM-DD."},
-            "minimo": {"type": "integer", "description": "Solo `entrenos`: mínimo de entrenos hechos."},
+            "desde": {"type": "string", "description": "Para `pago`, `entrenos`, `faltas`, `membresia` que vence y `comprobante`: YYYY-MM-DD."},
+            "hasta": {"type": "string", "description": "Igual que `desde`: YYYY-MM-DD."},
+            "minimo": {"type": "integer", "description": "`entrenos`: mínimo de entrenos hechos. `faltas`: mínimo sin hacer (por defecto 1)."},
         },
         "required": ["tipo"],
     },
@@ -201,6 +225,77 @@ SCHEMAS: list[dict[str, Any]] = [
                 },
             },
             "required": ["nombre", "entreno"],
+        },
+    },
+    {
+        "name": "plan_atleta",
+        "description": (
+            "Manda al chat el plan de un atleta día por día, y te devuelve a ti las mismas filas: qué le tocaba o le "
+            "toca, si lo hizo, no lo hizo o está por hacer. Sirve para «qué le toca esta semana», «cuáles entrenos "
+            "no hizo» o «qué tiene mañana»; admite fechas futuras. Por defecto, una semana atrás y una adelante; "
+            "máximo 92 días. No trae el título ni la descripción que escribió el coach."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre y/o apellido del atleta, o su código ATLETA_NN."},
+                "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
+                "desde": {"type": "string", "description": "Fecha inicial YYYY-MM-DD."},
+                "hasta": {"type": "string", "description": "Fecha final YYYY-MM-DD; puede ser futura."},
+                "formato": {
+                    "type": "string",
+                    "enum": ["auto", "imagen", "csv"],
+                    "description": "Igual que en `entrenos_atleta`: `imagen` o `csv` solo si el administrador lo pidió.",
+                },
+            },
+            "required": ["nombre"],
+        },
+    },
+    {
+        "name": "pagos_atleta",
+        "description": (
+            "Manda al chat hasta cuándo está cubierta la membresía de un atleta y sus comprobantes (fecha, estado, "
+            "meses, monto, si fue beneficio), y te devuelve lo mismo. Úsala para «¿ya pagó?», «¿cuándo se le "
+            "vence?» o «¿qué pasó con su comprobante?»."
+        ),
+        "input_schema": {"type": "object", "properties": {
+                "nombre": {"type": "string", "description": "Nombre y/o apellido del atleta, o su código ATLETA_NN."},
+                "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
+        }, "required": ["nombre"]},
+    },
+    {
+        "name": "perfil_atleta",
+        "description": (
+            "Manda al chat la ficha de un atleta: nivel, sede, género, edad aproximada, reloj y marca, meta, grupo, "
+            "membresía y su evento principal. A ti te devuelve lo mismo salvo la meta, que es texto que escribió "
+            "el atleta. No hay datos de contacto: ni correo ni teléfono."
+        ),
+        "input_schema": {"type": "object", "properties": {
+                "nombre": {"type": "string", "description": "Nombre y/o apellido del atleta, o su código ATLETA_NN."},
+                "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
+        }, "required": ["nombre"]},
+    },
+    {
+        "name": "comprobantes",
+        "description": (
+            "Manda al chat la lista de comprobantes en un estado (por defecto, los pendientes de revisar) con quién "
+            "subió cada uno, y te devuelve las mismas filas con códigos en vez de nombres. `desde` y `hasta` son la "
+            "fecha en que se subieron. Para «¿quién tiene comprobante pendiente?», «¿cuántos beneficios hay por "
+            "aprobar?» o «¿a quién se le rechazó?»."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "situacion": {"type": "string", "enum": ["pendiente", "aprobado", "rechazado"]},
+                "beneficio": {"type": "boolean", "description": "Solo los de beneficio (true) o solo los de pago (false)."},
+                "desde": {"type": "string", "description": "YYYY-MM-DD."},
+                "hasta": {"type": "string", "description": "YYYY-MM-DD."},
+                "formato": {
+                    "type": "string",
+                    "enum": ["auto", "imagen", "csv"],
+                    "description": "Igual que en `entrenos_atleta`: `imagen` o `csv` solo si el administrador lo pidió.",
+                },
+            },
         },
     },
     {
@@ -357,6 +452,44 @@ SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
+RECEIPT_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "name": "revisar_comprobante",
+        "description": (
+            "Manda al chat la foto de un comprobante pendiente con su tarjeta (quién, qué plan pidió, qué monto se "
+            "leyó, hasta cuándo quedaría cubierto) y los botones para aprobarlo o rechazarlo. Tú no apruebas ni "
+            "rechazas: lo hace el administrador con los botones. Sin argumentos manda el pendiente más antiguo "
+            "(«el siguiente»); con `nombre`, el pendiente de ese atleta; con `comprobante`, ese número. Manda uno "
+            "por llamada: para revisar varios, espera a que decidan el anterior."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "comprobante": {"type": "integer", "description": "Número del comprobante, de `comprobantes`."},
+                "nombre": {"type": "string", "description": "Nombre y/o apellido del atleta, o su código ATLETA_NN."},
+                "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
+            },
+        },
+    },
+    {
+        "name": "rechazar_comprobante",
+        "description": (
+            "Propone rechazar un comprobante pendiente con un motivo que no está entre los botones de la tarjeta. "
+            "No lo rechaza: muestra al administrador el motivo, que es lo que recibirá el atleta por correo, con "
+            "los botones Rechazar y Cancelar. Úsala solo si el administrador te dio el motivo; escríbelo en una o "
+            "dos frases dirigidas al atleta, sin inventar datos."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "comprobante": {"type": "integer", "description": "Número del comprobante."},
+                "motivo": {"type": "string", "description": "Lo que leerá el atleta: por qué no se aceptó y qué hacer."},
+            },
+            "required": ["comprobante", "motivo"],
+        },
+    },
+]
+
 PREFERENCE_SCHEMA: dict[str, Any] = {
     "name": "guardar_preferencia",
     "description": (
@@ -495,7 +628,49 @@ def _filter(raw: Any) -> dict[str, Any]:
         return {"type": "paid", **_window(raw)}
     if kind == "entrenos":
         return {"type": "workouts", **_window(raw), "min_done": _integer(raw, "minimo", 1, 366)}
-    raise ValueError("`tipo` must be evento, pago, grupo or entrenos")
+    if kind == "membresia":
+        status = raw.get("situacion")
+        if status not in MEMBERSHIP_STATUSES:
+            raise ValueError("a `membresia` filter needs `situacion`: vigente, vencida, sin_membresia or vence")
+        out = {"type": "membership", "status": MEMBERSHIP_STATUSES[status]}
+        return {**out, **_window(raw)} if status == "vence" else out
+    if kind == "comprobante":
+        status = raw.get("situacion")
+        if status not in RECEIPT_STATUSES:
+            raise ValueError("a `comprobante` filter needs `situacion`: pendiente, aprobado or rechazado")
+        out = {"type": "receipt", "status": RECEIPT_STATUSES[status]}
+        if isinstance(raw.get("beneficio"), bool):
+            out["benefit"] = raw["beneficio"]
+        for key, name in (("desde", "from"), ("hasta", "to")):
+            if _iso_date(raw, key):
+                out[name] = _iso_date(raw, key)
+        return out
+    if kind == "perfil":
+        out = {"type": "profile"}
+        if raw.get("nivel") is not None:
+            out["level"] = _integer(raw, "nivel", 0, 200)
+        if raw.get("sede"):
+            out["sede"] = _text(raw, "sede")
+        if raw.get("genero"):
+            if raw["genero"] not in GENDERS:
+                raise ValueError("`genero` must be femenino or masculino")
+            out["gender"] = GENDERS[raw["genero"]]
+        if isinstance(raw.get("reloj"), bool):
+            out["watch"] = raw["reloj"]
+        if len(out) == 1:
+            raise ValueError("a `perfil` filter needs `nivel`, `sede`, `genero` or `reloj`")
+        return out
+    if kind == "faltas":
+        out = {"type": "missed", **_window(raw)}
+        if raw.get("minimo") is not None:
+            out["min_missed"] = _integer(raw, "minimo", 1, 366)
+        return out
+    raise ValueError("`tipo` must be evento, pago, grupo, entrenos, membresia, comprobante, perfil or faltas")
+
+
+MEMBERSHIP_STATUSES = {"vigente": "current", "vencida": "expired", "sin_membresia": "none", "vence": "expires"}
+RECEIPT_STATUSES = {"pendiente": "pending", "aprobado": "approved", "rechazado": "rejected"}
+GENDERS = {"femenino": "female", "masculino": "male"}
 
 
 METRICS = {"personas": "athletes", "pagos": "payments", "entrenos": "workouts", "km": "distance_km", "score": "score_avg"}
@@ -545,6 +720,7 @@ def _row(code: str, person: dict[str, Any], summary: Optional[dict[str, Any]]) -
     if payment:
         amount = f" ${payment['amount']:,.2f}" if payment.get("amount") is not None else " sin monto"
         parts.append(f"último pago {payment['date']}{amount}")
+    parts += _extras(person)
     if summary is not None:
         workouts = summary["workouts"]
         parts.append(f"entrenos {workouts['done']}/{workouts['prescribed']}")
@@ -602,6 +778,164 @@ FORMATS = ("auto", "imagen", "csv")
 SENT = "{what}: no repitas sus cifras; comenta en dos o tres líneas lo que importa."
 WORKOUT_CSV = ["Fecha", "Tipo", "Km", "Tiempo", "Ritmo (min/km)", "FC (lpm)", "Score (%)", "Vueltas"]
 LAP_CSV = ["Vuelta", "Distancia (m)", "Tiempo", "Ritmo (min/km)", "FC (lpm)", "Score (%)"]
+
+
+RECEIPTS_LIMIT = 200
+PLAN_STATUS = {"done": "Hecho", "missed": "No hecho", "upcoming": "Por hacer"}
+PLAN_COLUMNS = [
+    ("Fecha", 1.1, "left"), ("Tipo", 2.0, "left"), ("Estado", 1.3, "left"), ("Km", 0.9, "right"),
+    ("Tiempo", 1.3, "right"), ("Ritmo", 1.0, "right"), ("Score", 1.0, "right"),
+]
+RECEIPT_COLUMNS = [
+    ("Subido", 1.7, "left"), ("Atleta", 3.2, "left"), ("Estado", 1.4, "left"), ("Tipo", 1.3, "left"),
+    ("Meses", 0.8, "right"), ("Monto", 1.6, "right"),
+]
+
+
+def _plan_cells(workout: dict[str, Any], blank: str = charts.EMPTY_CELL) -> list[str]:
+    """One day of a plan as table cells. What is still ahead shows the estimate, marked with `~`."""
+    done = workout["status"] == "done"
+    km = workout.get("distance_km") if done else workout.get("estimated_km")
+    seconds = workout.get("duration_sec") if done else workout.get("estimated_sec")
+    mark = "" if done else "~"
+    return [
+        _day(workout["date"]),
+        workout.get("type") or blank,
+        PLAN_STATUS[workout["status"]],
+        f"{mark}{km:.1f}" if km else blank,
+        mark + _race_time(round(seconds)) if seconds else blank,
+        workout.get("pace") or blank,
+        f"{_num(workout['score'])}%" if done and workout.get("score") is not None else blank,
+    ]
+
+
+def _plan_row(workout: dict[str, Any]) -> str:
+    parts = [workout["date"], workout.get("type") or "sin tipo", PLAN_STATUS[workout["status"]].lower()]
+    if workout["status"] == "done":
+        parts.append(f"#{workout['id']}")
+        parts.append(f"{workout['distance_km']} km")
+        parts += _measures(workout)
+    else:
+        if workout.get("estimated_km"):
+            parts.append(f"estimado {workout['estimated_km']} km")
+        if workout.get("estimated_sec"):
+            parts.append(f"estimado {_race_time(round(workout['estimated_sec']))}")
+    return " | ".join(parts)
+
+
+def _coverage(membership: dict[str, Any]) -> str:
+    until = membership.get("covered_until")
+    if not until:
+        return "sin membresía registrada"
+    verb = "cubierto hasta" if until >= date.today().isoformat() else "su membresía venció el"
+    return f"{verb} {_day_year(until)}"
+
+
+def _receipt_cells(receipt: dict[str, Any]) -> list[str]:
+    amount = receipt.get("amount")
+    return [
+        _day_year(receipt["uploaded"]) if receipt.get("uploaded") else charts.EMPTY_CELL,
+        RECEIPT_STATUS.get(receipt["status"], receipt["status"]).capitalize(),
+        "Beneficio" if receipt.get("benefit") else "Pago",
+        str(receipt["months"]) if receipt.get("months") else charts.EMPTY_CELL,
+        _money(amount) if amount else charts.EMPTY_CELL,
+    ]
+
+
+def _receipt_row(receipt: dict[str, Any]) -> str:
+    parts = [
+        f"subido {receipt.get('uploaded') or 'sin fecha'}",
+        RECEIPT_STATUS.get(receipt["status"], receipt["status"]),
+        "beneficio" if receipt.get("benefit") else "pago",
+    ]
+    if receipt.get("months"):
+        parts.append(f"{receipt['months']} mes(es)")
+    if receipt.get("amount"):
+        parts.append(f"${receipt['amount']:,.2f}")
+    if receipt.get("paid"):
+        parts.append(f"fecha de pago {receipt['paid']}")
+    return " | ".join(parts)
+
+
+RECEIPT_FILES = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp", "application/pdf": "pdf"}
+READINGS = {"pendiente": "La lectura automática sigue en curso.", "fallo": "La lectura automática falló.", "omitida": ""}
+
+
+def _reading(receipt: dict[str, Any]) -> str:
+    """How what was read off the receipt compares with the plan asked for. Figures only."""
+    if receipt.get("benefit"):
+        return "Es un beneficio: no lleva monto y los meses los elige quien aprueba."
+    amount, expected = receipt.get("amount"), receipt.get("expected")
+    if not amount:
+        return READINGS.get(receipt.get("reading") or "", "") or "No se leyó ningún monto."
+    if expected and abs(amount - expected) >= 0.01:
+        return f"Ojo: se leyó {_money(amount)} y el plan cuesta {_money(expected)}."
+    return f"El monto leído, {_money(amount)}, coincide con el plan."
+
+
+def _receipt_card(receipt_id: int, data: dict[str, Any]) -> str:
+    """What the admin reads before deciding. The first paragraph is what stays once it is decided."""
+    receipt, plans = data["receipt"], data["plans"]
+    if receipt.get("benefit"):
+        asked = "Beneficio, sin costo"
+    else:
+        asked = f"{receipt['months']} {'mes' if receipt['months'] == 1 else 'meses'}"
+        asked += f" ({_money(receipt['expected'])})" if receipt.get("expected") else ""
+    head = [f"Comprobante #{receipt_id} · {data['athlete']['name']}", f"Pidió: {asked}"]
+    if receipt.get("uploaded"):
+        head.append(f"Subido el {_day_year(receipt['uploaded'])}")
+    body = [_reading(receipt)]
+    read = []
+    if receipt.get("paid"):
+        read.append(f"fecha de pago {_day_year(receipt['paid'])}")
+    if receipt.get("reference"):
+        read.append(f"referencia {receipt['reference']}")
+    if read:
+        body.append("Leído del comprobante: " + ", ".join(read) + ".")
+    if not receipt.get("file"):
+        body.append("Este pago se registró sin archivo.")
+    body.append(f"Hoy: {_coverage(data.get('membership') or {})}.")
+    if receipt["status"] == "pending":
+        options = (f"{p['months']} {'mes' if p['months'] == 1 else 'meses'} → {_day_year(p['covers_until'])}" for p in plans)
+        body.append("Si se aprueba hoy: " + " · ".join(options))
+    else:
+        body.append(f"Estado: {RECEIPT_STATUS.get(receipt['status'], receipt['status'])}.")
+    return "\n".join(head) + "\n\n" + "\n".join(part for part in body if part)
+
+
+SIGNUP = {
+    "accepted": "aceptado", "rejected": "rechazado", "waiting_list": "en lista de espera",
+    "signed_up": "sin cuestionario", "awaiting_coach": "esperando a un coach",
+}
+
+
+def _profile_facts(data: dict[str, Any]) -> list[str]:
+    """A member's profile as short lines. Nothing here is text the member typed freely."""
+    athlete = data["athlete"]
+    facts = [f"Rol: {athlete.get('role') or 'sin rol'} · grupo: {(athlete.get('group') or 'ninguno').strip()}"]
+    who = []
+    if data.get("level") is not None:
+        who.append(f"nivel {data['level']}")
+    if data.get("sede"):
+        who.append(f"sede {data['sede']}")
+    if data.get("gender"):
+        who.append(str(data["gender"]).lower())
+    if data.get("age"):
+        who.append(f"unos {data['age']} años")
+    if who:
+        joined = ", ".join(who)
+        facts.append(joined[0].upper() + joined[1:])
+    watch = data.get("watch") or {}
+    brand = f" ({watch['brand']})" if watch.get("brand") else ""
+    facts.append(("Reloj vinculado" if watch.get("linked") else "Sin reloj vinculado") + brand)
+    facts.append("Membresía: " + _coverage(data.get("membership") or {}))
+    if data.get("signup") and data["signup"] != "accepted":
+        facts.append(f"Solicitud: {SIGNUP.get(data['signup'], data['signup'])}")
+    cycle = data.get("cycle")
+    if cycle:
+        target = f", objetivo {cycle['target_time']}" if cycle.get("target_time") else ""
+        facts.append(f"Evento principal: {cycle['event']} ({cycle['event_date']}){target}")
+    return facts
 
 
 def _format(args: dict[str, Any]) -> str:
@@ -692,6 +1026,8 @@ class Toolbox:
         self._preferences = preferences
         # Without somewhere to keep proposals and rules, the model is not offered the tool at all.
         self._schemas = SCHEMAS + [PREFERENCE_SCHEMA] if confirmations and preferences else SCHEMAS
+        if confirmations:
+            self._schemas = self._schemas + RECEIPT_SCHEMAS
 
     @property
     def schemas(self) -> list[dict[str, Any]]:
@@ -712,6 +1048,12 @@ class Toolbox:
             "consultar": lambda a, u: self._analyze(a, u, names),
             "entrenos_atleta": lambda a, u: self._workouts(a, u, names),
             "vueltas_entreno": lambda a, u: self._laps(a, u, names),
+            "plan_atleta": lambda a, u: self._plan(a, u, names),
+            "pagos_atleta": lambda a, u: self._payments(a, u, names),
+            "perfil_atleta": lambda a, u: self._profile(a, u, names),
+            "comprobantes": lambda a, u: self._receipts(a, u, names),
+            "revisar_comprobante": lambda a, u: self._review(a, u, names),
+            "rechazar_comprobante": lambda a, u: self._propose_rejection(a, u, names),
         }
         handlers["resumen_atleta"] = lambda a, u: self._summary(a, u, names)
         if self._confirmations and self._preferences:
@@ -1032,6 +1374,205 @@ class Toolbox:
             [[_day(w["date"]), w.get("type") or charts.EMPTY_CELL, f"{w['distance_km']:.1f}", *_cells(w)] for w in workouts],
             to_model,
         )
+
+    async def _deliver(
+        self,
+        layout: str,
+        filename: str,
+        label: str,
+        title: str,
+        subtitle: str,
+        columns: list[tuple[str, float, str]],
+        rows: list[list[str]],
+        csv_header: list[str],
+        csv_rows: list[list[Any]],
+        to_model: str,
+    ) -> ToolResult:
+        """The rows to the chat: a table picture while one holds them, a CSV past that, or what the admin asked for."""
+        if layout == "csv" or (layout == "auto" and len(rows) > charts.TABLE_MAX_ROWS):
+            return ToolResult(
+                f"{title}: {len(rows)} filas.",
+                to_model + "\n" + SENT.format(what="La lista ya salió al chat como archivo CSV"),
+                files=[OutFile(f"{filename}.csv", table_csv(csv_header, csv_rows))],
+            )
+        return await self._tables(filename, label, title, subtitle, columns, rows, to_model)
+
+    async def _plan(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        if start and end and start > end:
+            raise ValueError("`desde` is after `hasta`")
+        layout = _format(args)
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
+        params = {key: value for key, value in (("from", start), ("to", end)) if value}
+        data = await self._api.get(f"/assistant/athletes/{athlete_id}/plan", telegram_user_id=telegram_user_id, params=params)
+        span, workouts, counts = data["period"], data["workouts"], data["counts"]
+        if not workouts:
+            return ToolResult(None, f"Sin entrenos prescritos del {span['from']} al {span['to']}.")
+        tally = f"{counts['done']} hechos, {counts['missed']} sin hacer, {counts['upcoming']} por hacer"
+        to_model = f"Plan del {span['from']} al {span['to']} (hoy es {data['today']}): {tally}.\n" + "\n".join(
+            _plan_row(w) for w in workouts
+        )
+        return await self._deliver(
+            layout,
+            "plan",
+            "Plan",
+            data["athlete"]["name"],
+            f"{_period(span['from'], span['to'])}  ·  {tally}",
+            PLAN_COLUMNS,
+            [_plan_cells(w) for w in workouts],
+            ["Fecha", "Tipo", "Estado", "Km", "Tiempo", "Ritmo (min/km)", "Score (%)"],
+            [[w["date"], *_plan_cells(w, blank="")[1:]] for w in workouts],
+            to_model,
+        )
+
+    async def _payments(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
+        data = await self._api.get(f"/assistant/athletes/{athlete_id}/payments", telegram_user_id=telegram_user_id)
+        coverage = _coverage(data["membership"])
+        receipts = data["receipts"]
+        if not receipts:
+            return ToolResult(f"{data['athlete']['name']}: {coverage}. Sin comprobantes.", f"{coverage}. Sin comprobantes.")
+        to_model = f"{coverage}. {data['total']} comprobante(s):\n" + "\n".join(_receipt_row(r) for r in receipts)
+        return await self._tables(
+            "pagos",
+            "Pagos",
+            data["athlete"]["name"],
+            coverage[0].upper() + coverage[1:],
+            RECEIPT_COLUMNS[:1] + RECEIPT_COLUMNS[2:],
+            [_receipt_cells(r) for r in receipts],
+            to_model,
+        )
+
+    async def _receipts(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        status = args.get("situacion") or "pendiente"
+        if status not in RECEIPT_STATUSES:
+            raise ValueError("`situacion` must be pendiente, aprobado or rechazado")
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        if start and end and start > end:
+            raise ValueError("`desde` is after `hasta`")
+        layout = _format(args)
+        params: dict[str, Any] = {"status": RECEIPT_STATUSES[status], "limit": RECEIPTS_LIMIT}
+        params.update({key: value for key, value in (("from", start), ("to", end)) if value})
+        if isinstance(args.get("beneficio"), bool):
+            params["benefit"] = "true" if args["beneficio"] else "false"
+        data = await self._api.get("/assistant/receipts", telegram_user_id=telegram_user_id, params=params)
+        receipts, total = data["receipts"], data["total"]
+        plural = f"comprobante(s) {status}(s)"
+        if not receipts:
+            return ToolResult(None, f"Ningún comprobante {status} con esos filtros.")
+        names = names if names is not None else Pseudonyms()
+        left = f" Van solo los {len(receipts)} más recientes." if data.get("truncated") else ""
+        to_model = f"{total} {plural}.{left}\n" + "\n".join(
+            f"{names.code(r['athlete']['id'], r['athlete']['name'])} | {_receipt_row(r)}" for r in receipts
+        )
+        return await self._deliver(
+            layout,
+            "comprobantes",
+            "Comprobantes",
+            f"{total} {status}s" if total != 1 else f"1 {status}",
+            "Del más reciente al más antiguo" + (f"  ·  los {len(receipts)} más recientes" if data.get("truncated") else ""),
+            RECEIPT_COLUMNS,
+            [[_receipt_cells(r)[0], r["athlete"]["name"], *_receipt_cells(r)[1:]] for r in receipts],
+            ["Subido", "Atleta", "Estado", "Tipo", "Meses", "Monto", "Fecha de pago", "Motivo de rechazo"],
+            [
+                [
+                    r.get("uploaded") or "", r["athlete"]["name"], RECEIPT_STATUS.get(r["status"], r["status"]),
+                    "beneficio" if r.get("benefit") else "pago", r.get("months") or "",
+                    "" if r.get("amount") is None else r["amount"], r.get("paid") or "", r.get("reason") or "",
+                ]
+                for r in receipts
+            ],
+            to_model,
+        )
+
+    async def _review(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        names = names if names is not None else Pseudonyms()
+        if args.get("comprobante") is not None:
+            receipt_id = _integer(args, "comprobante", 1, 2**31 - 1)
+        elif args.get("nombre"):
+            athlete_id = await self._pick(args, telegram_user_id, names)
+            if isinstance(athlete_id, ToolResult):
+                return athlete_id
+            mine = await self._api.get(f"/assistant/athletes/{athlete_id}/payments", telegram_user_id=telegram_user_id)
+            waiting = [r["id"] for r in mine["receipts"] if r["status"] == "pending"]
+            if not waiting:
+                return ToolResult(None, "Ese atleta no tiene comprobantes pendientes.")
+            receipt_id = waiting[-1]
+        else:
+            queue = await self._api.get(
+                "/assistant/receipts", telegram_user_id=telegram_user_id, params={"status": "pending", "limit": RECEIPTS_LIMIT}
+            )
+            if not queue["receipts"]:
+                return ToolResult(None, "No hay comprobantes pendientes.")
+            receipt_id = queue["receipts"][-1]["id"]
+
+        data = await self._api.get(f"/assistant/receipts/{receipt_id}", telegram_user_id=telegram_user_id)
+        receipt, athlete = data["receipt"], data["athlete"]
+        files, missing = [], ""
+        if receipt.get("file"):
+            try:
+                content, mime = await self._api.get_file(f"/assistant/receipts/{receipt_id}/file", telegram_user_id=telegram_user_id)
+            except ApiError as exc:
+                # The card is still worth sending: the admin can open the file in the console.
+                log.warning("receipt %s: its file could not be fetched: API status %s", receipt_id, exc.status)
+                missing = "\nNo pude traer el archivo; ábrelo en la consola."
+            else:
+                kind = RECEIPT_FILES.get(mime)
+                files = [OutFile(f"comprobante_{receipt_id}.{kind or 'bin'}", content, photo=kind in ("jpg", "png"), mime=mime)]
+
+        card = _receipt_card(receipt_id, data) + missing
+        code = names.code(athlete["id"], athlete["name"])
+        seen = f"Comprobante #{receipt_id} de {code}: {_receipt_row(receipt)}. {_reading(receipt)}"
+        if receipt["status"] != "pending" or self._confirmations is None:
+            return ToolResult(card, f"{seen} Ya no está pendiente: salió al chat sin botones.", files=files)
+        action_id = await self._confirmations.propose(
+            telegram_user_id, "receipt", {"receipt": receipt_id}, card.split("\n\n")[0]
+        )
+        months = [plan["months"] for plan in data["plans"]]
+        buttons = confirmations.receipt_buttons(action_id, months, receipt.get("months"), bool(receipt.get("benefit")))
+        left = data.get("pending", 1) - 1
+        return ToolResult(
+            card,
+            f"{seen} La tarjeta salió al chat con {'la foto y ' if files else ''}los botones; quedan {left} pendientes más. Tú no "
+            "apruebas ni rechazas: espera a que el administrador pulse. No repitas la tarjeta.",
+            files=files,
+            buttons=buttons,
+        )
+
+    async def _propose_rejection(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        if self._confirmations is None:
+            return ToolResult(None, "No puedo proponer acciones en esta instalación.", is_error=True)
+        receipt_id = _integer(args, "comprobante", 1, 2**31 - 1)
+        reason = _text(args, "motivo", 10, 300).strip()
+        data = await self._api.get(f"/assistant/receipts/{receipt_id}", telegram_user_id=telegram_user_id)
+        if data["receipt"]["status"] != "pending":
+            return ToolResult(None, f"El comprobante #{receipt_id} ya no está pendiente.")
+        summary = f"Rechazar el comprobante #{receipt_id} de {data['athlete']['name']}.\nMotivo que recibirá por correo: «{reason}»"
+        payload = {"receipt": receipt_id, "decision": {"accion": "rechazar", "motivo": reason}}
+        action_id = await self._confirmations.propose(telegram_user_id, "receipt_reject", payload, summary)
+        return ToolResult(
+            summary,
+            "Propuesta enviada al chat con los botones Rechazar y Cancelar. No está rechazado hasta que pulsen.",
+            buttons=confirmations.buttons(action_id, "Rechazar"),
+        )
+
+    async def _profile(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
+        data = await self._api.get(f"/assistant/athletes/{athlete_id}/profile", telegram_user_id=telegram_user_id)
+        facts = _profile_facts(data)
+        athlete = data["athlete"]
+        shown = [athlete["name"] + ("" if athlete.get("active", True) else " (inactivo)"), *facts]
+        goal = data.get("goal")
+        if goal:
+            shown.append("Meta: " + " · ".join(str(v) for v in (goal.get("distance"), goal.get("time"), goal.get("date")) if v))
+        hidden = " Su meta (texto que escribió el atleta) salió al chat; tú no la ves." if goal else ""
+        return ToolResult("\n".join(shown), "Ficha enviada al chat. " + " | ".join(facts) + "." + hidden)
 
     async def _tables(
         self,

@@ -45,7 +45,7 @@ class FakeTelegram:
     async def send_document(self, chat_id, filename, content, caption="", thread_id=None):
         self.documents.append((chat_id, filename, content, caption, thread_id))
 
-    async def send_photo(self, chat_id, filename, content, caption="", thread_id=None):
+    async def send_photo(self, chat_id, filename, content, caption="", thread_id=None, mime="image/png"):
         self.photos.append((chat_id, filename, content, caption, thread_id))
 
     async def send_photos(self, chat_id, photos, caption="", thread_id=None):
@@ -1012,3 +1012,96 @@ def test_the_options_of_a_question_go_one_per_row_and_a_confirmation_side_by_sid
     rows = main_module._keyboard(choice_buttons(["Uno", "Dos", "Tres"], 10))["inline_keyboard"]
     assert [len(row) for row in rows] == [1, 1, 1] and rows[2][0] == {"text": "Tres", "callback_data": "q:10:2"}
     assert [len(row) for row in main_module._keyboard([("Guardar", "ok:a"), ("Cancelar", "no:a")])["inline_keyboard"]] == [2]
+
+
+# ── Receipts: the click is what writes ────────────────────────────────
+
+
+class WritingApi:
+    def __init__(self, fail=None):
+        self.writes, self.fail = [], fail
+
+    async def write(self, path, *, telegram_user_id, json):
+        self.writes.append((path, telegram_user_id, json))
+        if self.fail:
+            raise self.fail
+        return {"success": True, "data": {"cubierto_hasta": "2026-12-31"}}
+
+
+async def with_receipts(settings, tmp_path, api):
+    bot, tg, store, _ = await with_preferences(settings, tmp_path)
+    bot._api = api
+    action = await store.propose(10, "receipt", {"receipt": 6}, "Comprobante #6 · Ana Ruiz")
+    return bot, tg, store, action
+
+
+def named(update, name="Adrián"):
+    update["callback_query"]["from"]["first_name"] = name
+    return update
+
+
+async def test_a_click_on_a_plan_approves_the_receipt_once_and_as_whoever_clicked(settings, tmp_path):
+    api = WritingApi()
+    bot, tg, _, action = await with_receipts(settings, tmp_path, api)
+
+    await bot.handle(click(f"rc:a3:{action}", user=20))
+    assert api.writes == [] and tg.popups == [main_module.NOT_YOURS]
+
+    await bot.handle(named(click(f"rc:a3:{action}")))
+    assert api.writes == [("/assistant/receipts/6/decide", 10, {"accion": "aprobar", "meses": 3})]
+    assert tg.edits == [(900, "Comprobante #6 · Ana Ruiz\n\nAprobado por Adrián: 3 meses, cubierto hasta 31 dic 2026.")]
+
+    await bot.handle(click(f"rc:a1:{action}"))  # a second click on another plan
+    assert len(api.writes) == 1 and tg.popups[-1] == main_module.NO_LONGER_VALID
+    log = (tmp_path / "audit.log").read_text(encoding="utf-8")
+    assert '"receipt": 6' in log and '"verb": "a3"' in log
+
+
+async def test_a_reason_button_rejects_with_its_text_and_leaving_it_pending_writes_nothing(settings, tmp_path):
+    from duma.confirmations import REJECTIONS
+
+    api = WritingApi()
+    bot, tg, store, action = await with_receipts(settings, tmp_path, api)
+    await bot.handle(named(click(f"rc:ri:{action}")))
+    assert api.writes == [("/assistant/receipts/6/decide", 10, {"accion": "rechazar", "motivo": REJECTIONS["ri"][1]})]
+    assert tg.edits[0][1].startswith("Comprobante #6 · Ana Ruiz\n\nRechazado por Adrián. Motivo que recibe el atleta: «La foto")
+
+    other = await store.propose(10, "receipt", {"receipt": 7}, "Comprobante #7 · Beto")
+    await bot.handle(click(f"rc:x:{other}"))
+    assert len(api.writes) == 1 and tg.edits[-1] == (900, "Comprobante #7 · Beto\n\nSigue pendiente.")
+    # A button this module never made does nothing.
+    third = await store.propose(10, "receipt", {"receipt": 8}, "Comprobante #8")
+    await bot.handle(click(f"rc:drop:{third}"))
+    assert len(api.writes) == 1
+
+
+async def test_a_proposed_rejection_runs_on_its_own_button_and_an_api_refusal_is_said(settings, tmp_path):
+    from duma.api_client import ApiError
+
+    api = WritingApi()
+    bot, tg, store, _ = await with_receipts(settings, tmp_path, api)
+    decision = {"accion": "rechazar", "motivo": "Sube el comprobante a tu nombre."}
+    action = await store.propose(10, "receipt_reject", {"receipt": 6, "decision": decision}, "Rechazar el #6")
+    await bot.handle(click(f"no:{action}"))
+    assert api.writes == [] and tg.edits[-1] == (900, "Rechazar el #6\n\nCancelado.")
+
+    action = await store.propose(10, "receipt_reject", {"receipt": 6, "decision": decision}, "Rechazar el #6")
+    api.fail = ApiError(200, "Ese comprobante ya fue resuelto")
+    await bot.handle(click(f"ok:{action}"))
+    assert api.writes == [("/assistant/receipts/6/decide", 10, decision)]
+    assert tg.edits[-1] == (900, "Rechazar el #6\n\nNo se pudo: Ese comprobante ya fue resuelto")
+
+
+async def test_a_card_with_a_photo_and_buttons_sends_the_photo_first_and_the_text_with_the_keyboard(settings, tmp_path):
+    from duma.tools import OutFile
+
+    class Reviewer(FakeAgent):
+        async def run(self, session, text, user, send):
+            photo = OutFile("comprobante_6.jpg", b"\xff\xd8", photo=True, mime="image/jpeg")
+            await send("Comprobante #6", [photo], [("1 mes", "rc:a1:abc"), ("Rechazar: ilegible", "rc:ri:abc"), ("Dejar pendiente", "rc:x:abc")])
+            return None
+
+    bot, tg, _ = make(settings, tmp_path, Reviewer())
+    await bot.handle(msg("el siguiente comprobante", message_thread_id=7, is_topic_message=True))
+    assert tg.photos == [(ADMIN, "comprobante_6.jpg", b"\xff\xd8", "", 7)]
+    assert tg.sent == [(ADMIN, "Comprobante #6", 7)] and tg.keyboards == [["rc:a1:abc"]]

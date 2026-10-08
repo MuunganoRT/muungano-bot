@@ -19,6 +19,7 @@ from duma.config import ConfigError, Settings, load
 from duma.database import Database, DatabaseError, PostgresDatabase, SqliteDatabase
 from duma.confirmations import Confirmations
 from duma.preferences import Preferences
+from duma.render import _day_year
 from duma.sessions import SessionStore
 from duma.telegram_api import Telegram, TelegramError
 from duma.tools import OutFile, Toolbox, parse_choice
@@ -57,6 +58,8 @@ BUDGET_REACHED = "Con esta respuesta se alcanzó el tope de hoy (${limit:.2f} US
 NO_PREFS = "No hay reglas permanentes guardadas. Pídeme una con algo como «siempre que te pida X, mándalo así»."
 FORGET_NEEDS_NUMBER = "Dime cuál con su número, por ejemplo /forget 2. La lista sale con /prefs."
 NOT_YOURS = "Solo quien lo pidió puede decidir."
+# The kinds of pending action that end in `Bot._decide_receipt`.
+RECEIPT_KINDS = ("receipt", "receipt_reject")
 NO_LONGER_VALID = "Esto ya se decidió o ya no está vigente."
 EXPIRED = "Caducó sin decidirse. Pídemelo otra vez."
 RUN_NEEDS_TEXT = "Escribe la pregunta después del comando. Por ejemplo: /ruun ¿cuántos inactivos hay?"
@@ -98,6 +101,10 @@ def _keyboard(buttons: Optional[list[tuple[str, str]]]) -> Optional[dict[str, An
     # Guardar/Cancelar sit side by side; the options of a question go one under another, so their text fits.
     if any(parse_choice(data) for _, data in buttons):
         return {"inline_keyboard": [[cell] for cell in cells]}
+    if any(confirmations.parse_receipt(data) for _, data in buttons):
+        # The plans share a row; each way out of approving gets its own.
+        plans = [cell for cell in cells if cell["callback_data"].split(":")[1][:1] == "a"]
+        return {"inline_keyboard": [plans, *[[cell] for cell in cells if cell not in plans]]}
     return {"inline_keyboard": [cells]}
 
 
@@ -352,7 +359,8 @@ class Bot:
         if choice is not None:
             await self._on_choice(query, *choice)
             return
-        parsed = confirmations.parse(query.get("data", ""))
+        on_card = confirmations.parse_receipt(query.get("data", ""))
+        parsed = on_card or confirmations.parse(query.get("data", ""))
         if parsed is None or self._confirmations is None:
             await self._tg.answer_callback_query(query["id"])
             return
@@ -363,13 +371,20 @@ class Bot:
             await self._tg.answer_callback_query(query["id"], NOT_YOURS)
             return
 
-        if status == "ok" and verb == confirmations.CANCEL:
-            outcome = "Cancelado."
+        who = (query["from"].get("first_name") or "").strip() or "un administrador"
+        if status == "ok" and verb in (confirmations.CANCEL, confirmations.CLOSE):
+            outcome = "Sigue pendiente." if on_card else "Cancelado."
+        elif status == "ok" and pending.kind in RECEIPT_KINDS:
+            choice = confirmations.decision(verb) if on_card else pending.payload["decision"]
+            outcome = await self._decide_receipt(pending.payload["receipt"], choice, user_id, who)
         elif status == "ok":
             outcome = self._execute(pending.kind, pending.payload, user_id)
         else:
             outcome = EXPIRED if status == "expired" else NO_LONGER_VALID
-        self._audit.log("confirmation", user=user_id, action=action_id, kind=pending.kind if pending else None, verb=verb, status=status)
+        self._audit.log(
+            "confirmation", user=user_id, action=action_id, kind=pending.kind if pending else None, verb=verb,
+            status=status, receipt=pending.payload.get("receipt") if pending else None,
+        )
         await self._tg.answer_callback_query(query["id"], outcome)
 
         shown = query.get("message") or {}
@@ -406,6 +421,24 @@ class Bot:
         if await self._over_budget(chat_id, thread_id):
             return
         await self._ask(chat_id, user_id, thread_id, label)
+
+    async def _decide_receipt(self, receipt_id: int, choice: Optional[dict[str, Any]], user_id: int, who: str) -> str:
+        """Approve or reject a receipt in the API, as the admin who pressed the button."""
+        if self._api is None or choice is None:
+            return NO_LONGER_VALID
+        try:
+            done = await self._api.write(
+                f"/assistant/receipts/{receipt_id}/decide", telegram_user_id=user_id, json=choice
+            )
+        except ApiError as exc:
+            log.warning("deciding receipt %s failed: API status %s: %s", receipt_id, exc.status, exc.message)
+            return f"No se pudo: {exc.message}"
+        if choice["accion"] == "rechazar":
+            return f"Rechazado por {who}. Motivo que recibe el atleta: «{choice['motivo']}»"
+        months = choice["meses"]
+        until = (done.get("data") or {}).get("cubierto_hasta")
+        covered = f", cubierto hasta {_day_year(until)}" if until else ""
+        return f"Aprobado por {who}: {months} {'mes' if months == 1 else 'meses'}{covered}."
 
     def _execute(self, kind: str, payload: dict[str, Any], user_id: int) -> str:
         """Run a confirmed action and say what happened. Every kind of action with an effect is listed here."""
@@ -538,18 +571,22 @@ class Bot:
         async def say(
             reply: str, files: Optional[list[OutFile]] = None, buttons: Optional[list[tuple[str, str]]] = None
         ) -> None:
-            photos = [(f.name, f.content) for f in files or [] if f.photo]
+            # Buttons only hang from a text message, and that message is the one rewritten once they are
+            # pressed: with buttons the files go first, bare, and the text follows with the keyboard.
+            caption = "" if buttons else reply
+            photos = [f for f in files or [] if f.photo]
             if len(photos) > 1:
-                await self._tg.send_photos(chat_id, photos, reply, thread_id)
-                reply = ""
+                await self._tg.send_photos(chat_id, [(f.name, f.content) for f in photos], caption, thread_id)
+                caption = ""
             elif photos:
-                await self._tg.send_photo(chat_id, photos[0][0], photos[0][1], reply, thread_id)
-                reply = ""
+                only = photos[0]
+                await self._tg.send_photo(chat_id, only.name, only.content, caption, thread_id, only.mime)
+                caption = ""
             for file in files or []:
                 if not file.photo:
-                    await self._tg.send_document(chat_id, file.name, file.content, reply, thread_id)
-                    reply = ""
-            if not files:
+                    await self._tg.send_document(chat_id, file.name, file.content, caption, thread_id)
+                    caption = ""
+            if not files or buttons:
                 await self._tg.send_message(chat_id, reply, thread_id, _keyboard(buttons))
 
         content: Any = text

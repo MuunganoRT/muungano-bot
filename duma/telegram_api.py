@@ -129,6 +129,7 @@ class Telegram:
         content: bytes,
         caption: str = "",
         thread_id: Optional[int] = None,
+        mime: str = "image/png",
     ) -> None:
         """A picture shown in the chat itself. Telegram recompresses it; `send_document` keeps the original."""
         params: dict[str, Any] = {"chat_id": chat_id}
@@ -136,7 +137,7 @@ class Telegram:
             params["caption"] = caption[:MAX_CAPTION]
         if thread_id:
             params["message_thread_id"] = thread_id
-        await self._call("sendPhoto", params, files={"photo": (filename, content, "image/png")})
+        await self._call("sendPhoto", params, files={"photo": (filename, content, mime)})
 
     async def send_photos(
         self,

@@ -38,6 +38,48 @@ def buttons(action_id: str, confirm_label: str) -> list[tuple[str, str]]:
     return [(confirm_label, f"{CONFIRM}:{action_id}"), ("Cancelar", f"{CANCEL}:{action_id}")]
 
 
+RECEIPT = "rc"
+CLOSE = "x"
+# What the member is told by e-mail, word for word.
+REJECTIONS = {
+    "ri": ("Ilegible", "La foto no se alcanza a leer. Sube una imagen más clara de tu comprobante."),
+    "rm": ("Monto no coincide", "El monto del comprobante no coincide con el plan que elegiste."),
+    "rn": ("No es un comprobante", "El archivo que subiste no es un comprobante de pago."),
+    "rb": ("Beneficio no válido", "No pudimos validar tu beneficio con esa imagen."),
+}
+
+
+def receipt_buttons(action_id: str, months: list[int], asked: Optional[int], benefit: bool) -> list[tuple[str, str]]:
+    """The buttons of a receipt card: one per plan, the reasons to reject, and one to leave it as it is."""
+    out = []
+    for n in months:
+        label = f"{n} mes" if n == 1 else f"{n} meses"
+        out.append((f"Aprobar {label}" if n == asked else label, f"{RECEIPT}:a{n}:{action_id}"))
+    for code in ("ri", "rb") if benefit else ("ri", "rm", "rn"):
+        out.append((f"Rechazar: {REJECTIONS[code][0].lower()}", f"{RECEIPT}:{code}:{action_id}"))
+    out.append(("Dejar pendiente", f"{RECEIPT}:{CLOSE}:{action_id}"))
+    return out
+
+
+def parse_receipt(data: str) -> Optional[tuple[str, str]]:
+    """`rc:a3:<id>` -> (`a3`, id); None for anything that is not a button of a receipt card."""
+    parts = (data or "").split(":")
+    if len(parts) != 3 or parts[0] != RECEIPT or not parts[2]:
+        return None
+    code = parts[1]
+    known = code == CLOSE or code in REJECTIONS or (code[:1] == "a" and code[1:].isdigit())
+    return (code, parts[2]) if known else None
+
+
+def decision(code: str) -> Optional[dict[str, Any]]:
+    """What a button of a receipt card asks the API to do. None for the one that leaves it pending."""
+    if code in REJECTIONS:
+        return {"accion": "rechazar", "motivo": REJECTIONS[code][1]}
+    if code[:1] == "a" and code[1:].isdigit():
+        return {"accion": "aprobar", "meses": int(code[1:])}
+    return None
+
+
 def parse(data: str) -> Optional[tuple[str, str]]:
     """`ok:<id>` -> (`ok`, id); None for anything that is not one of this module's buttons."""
     verb, _, action_id = (data or "").partition(":")

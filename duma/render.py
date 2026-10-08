@@ -120,6 +120,29 @@ def _money(amount: float) -> str:
     return f"${amount:,.0f} MXN" if abs(amount - round(amount)) < 0.005 else f"${amount:,.2f} MXN"
 
 
+RECEIPT_STATUS = {"pending": "pendiente", "approved": "aprobado", "rejected": "rechazado"}
+
+
+def _extras(a: dict[str, Any]) -> list[str]:
+    """What the newer filters were about, as short phrases for one member's line."""
+    parts = []
+    if "covered_until" in a:
+        parts.append(f"cubierto hasta {_day_year(a['covered_until'])}" if a["covered_until"] else "sin membresía")
+    receipt = a.get("receipt")
+    if receipt:
+        kind = "beneficio" if receipt.get("benefit") else "comprobante"
+        parts.append(f"{kind} {RECEIPT_STATUS.get(receipt['status'], receipt['status'])} ({_day_year(receipt['date'])})")
+    if "watch" in a:
+        if a.get("level") is not None:
+            parts.append(f"nivel {a['level']}")
+        if a.get("sede"):
+            parts.append(a["sede"])
+        parts.append("con reloj" if a["watch"] else "sin reloj")
+    if "missed" in a:
+        parts.append(f"{a['missed']} sin hacer")
+    return parts
+
+
 def render_matches(found: dict[str, Any]) -> str:
     """The members a filtered query matched, each with the columns its filters were about."""
     athletes, total = found["athletes"], found["total"]
@@ -137,6 +160,7 @@ def render_matches(found: dict[str, Any]) -> str:
         if payment:
             amount = f"{_money(payment['amount'])} " if payment.get("amount") is not None else ""
             parts.append(f"pagó {amount}el {_day_year(payment['date'])}")
+        parts += _extras(a)
         lines.append("- " + " · ".join(parts))
     if total > len(athletes):
         lines.append(f"…y {total - len(athletes)} más; acota los filtros.")
@@ -170,6 +194,17 @@ def matches_csv(found: dict[str, Any]) -> bytes:
         header += ["Evento", "Fecha del evento", "Tiempo"]
     if with_payment:
         header += ["Último pago", "Monto"]
+    extras = [
+        ("Cubierto hasta", "covered_until", lambda a: a.get("covered_until") or ""),
+        ("Comprobante", "receipt", lambda a: RECEIPT_STATUS.get(a["receipt"]["status"], "") if a.get("receipt") else ""),
+        ("Beneficio", "receipt", lambda a: ("sí" if a["receipt"].get("benefit") else "no") if a.get("receipt") else ""),
+        ("Nivel", "watch", lambda a: a.get("level") if a.get("level") is not None else ""),
+        ("Sede", "watch", lambda a: a.get("sede") or ""),
+        ("Reloj", "watch", lambda a: "sí" if a.get("watch") else "no"),
+        ("Sin hacer", "missed", lambda a: a.get("missed", "")),
+    ]
+    extras = [(title, read) for title, key, read in extras if any(key in a for a in athletes)]
+    header += [title for title, _ in extras]
 
     out = io.StringIO()
     writer = csv.writer(out)
@@ -186,6 +221,7 @@ def matches_csv(found: dict[str, Any]) -> bytes:
         if with_payment:
             payment = a.get("last_payment") or {}
             row += [payment.get("date") or "", "" if payment.get("amount") is None else payment["amount"]]
+        row += [read(a) for _, read in extras]
         writer.writerow([_cell(v) for v in row])
     # The BOM is what makes Excel read the accents as UTF-8.
     return out.getvalue().encode("utf-8-sig")

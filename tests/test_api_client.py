@@ -64,6 +64,10 @@ async def test_the_read_routes_are_allowed():
     await api.get("/assistant/athletes/12/workouts", telegram_user_id=1)
     await api.get("/assistant/athletes/12/workouts/345/laps", telegram_user_id=1)
     await api.get("/assistant/catalog", telegram_user_id=1)
+    for tail in ("athletes/12/plan", "athletes/12/payments", "athletes/12/profile", "receipts"):
+        await api.get(f"/assistant/{tail}", telegram_user_id=1)
+    with pytest.raises(ApiError, match="not allowed"):
+        await api.get("/assistant/athletes/12/receipts/3/archivo", telegram_user_id=1)
     await api.post("/assistant/athletes/query", telegram_user_id=1, json={"filters": []})
     await api.post("/assistant/athletes/aggregate", telegram_user_id=1, json={})
     await api.post("/assistant/athletes/series", telegram_user_id=1, json={})
@@ -108,3 +112,28 @@ async def test_timeouts_connection_errors_and_garbage():
     for handler, text in ((timeout, "too long"), (refused, "reach"), (garbage, "unexpected")):
         with pytest.raises(ApiError, match=text):
             await make(handler).get("/assistant/athletes", telegram_user_id=1)
+
+
+async def test_a_write_route_is_reachable_only_through_write_and_a_file_only_through_get_file():
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.url.path.endswith("/file"):
+            return httpx.Response(200, content=b"\xff\xd8", headers={"content-type": "image/jpeg"})
+        return httpx.Response(200, json={"success": True, "data": {"cubierto_hasta": "2026-12-31"}})
+
+    api = make(handler)
+    body = {"accion": "aprobar", "meses": 3}
+    with pytest.raises(ApiError, match="not allowed"):
+        await api.post("/assistant/receipts/12/decide", telegram_user_id=1, json=body)
+    with pytest.raises(ApiError, match="not allowed"):
+        await api.get("/assistant/receipts/12/file", telegram_user_id=1)
+    with pytest.raises(ApiError, match="not allowed"):
+        await api.write("/assistant/athletes/query", telegram_user_id=1, json={})
+    assert seen == []
+
+    assert (await api.write("/assistant/receipts/12/decide", telegram_user_id=1, json=body))["data"]
+    assert await api.get_file("/assistant/receipts/12/file", telegram_user_id=1) == (b"\xff\xd8", "image/jpeg")
+    await api.get("/assistant/receipts/12", telegram_user_id=1)
+    assert [m for m, _ in seen] == ["POST", "GET", "GET"]
