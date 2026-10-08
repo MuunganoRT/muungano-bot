@@ -521,6 +521,69 @@ SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
+WHO = {
+    "nombre": {"type": "string", "description": "Nombre y/o apellido del atleta, o su código ATLETA_NN."},
+    "grupo": {"type": "string", "description": "Nombre del grupo, para distinguir homónimos."},
+}
+
+MEMBER_WRITE_SCHEMAS: list[dict[str, Any]] = [
+    {
+        "name": "renovar_membresia",
+        "description": (
+            "Propone registrar un pago recibido fuera de la app (efectivo, transferencia directa) y activar la "
+            "membresía: lo que la consola llama «Renovar membresía». Úsala también cuando digan «activa la "
+            "membresía de…» o «pagó en efectivo». NO la renueva: muestra al administrador el plan, su precio, el "
+            "monto recibido y hasta cuándo quedaría cubierto, con los botones Renovar y Cancelar. Necesitas que te "
+            "digan los meses (1, 3 o 6); si no lo dijeron, pregunta. El precio lo pone el servidor: `monto` es lo "
+            "que el administrador dice que recibió, no lo calcules tú. Si el atleta tiene un comprobante en "
+            "revisión, no se puede: ese se aprueba con `revisar_comprobante`."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                **WHO,
+                "meses": {"type": "integer", "enum": [1, 3, 6]},
+                "monto": {"type": "number", "description": "Lo que se recibió, en pesos. Solo si el administrador lo dijo."},
+                "fecha_pago": {"type": "string", "description": "YYYY-MM-DD. Sin ella, hoy."},
+                "referencia": {"type": "string", "description": "Como lo dijo el administrador: «efectivo», una clave de rastreo…"},
+            },
+            "required": ["nombre", "meses"],
+        },
+    },
+    {
+        "name": "pausar_atleta",
+        "description": (
+            "Propone pausar a un atleta (deja de poder entrar a la app) o reactivarlo. NO lo hace: muestra la "
+            "propuesta con los botones de confirmar y Cancelar. No sirve para archivar ni para traer de vuelta a "
+            "alguien archivado: eso es en la consola."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {**WHO, "accion": {"type": "string", "enum": ["pausar", "reactivar"]}},
+            "required": ["nombre", "accion"],
+        },
+    },
+    {
+        "name": "tiempo_carrera",
+        "description": (
+            "Propone registrar el tiempo final de un atleta en una carrera a la que está inscrito. NO lo registra: "
+            "muestra el tiempo, el evento, su objetivo y el tiempo que ya tuviera, con los botones Registrar y "
+            "Cancelar. `evento` es el nombre (o parte) del evento; si coincide con varios o con ninguno, la "
+            "herramienta te dice en cuáles está inscrito y tú preguntas. `tiempo` va como H:MM:SS, tal como te lo "
+            "dieron: no lo redondees ni lo estimes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                **WHO,
+                "evento": {"type": "string", "description": "Nombre o parte del nombre del evento."},
+                "tiempo": {"type": "string", "description": "Tiempo final, H:MM:SS. Ejemplo: 3:42:10."},
+            },
+            "required": ["nombre", "evento", "tiempo"],
+        },
+    },
+]
+
 APPLICATION_SCHEMA: dict[str, Any] = {
     "name": "revisar_solicitud",
     "description": (
@@ -969,6 +1032,21 @@ def application_card(a: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _seconds(text: str) -> int:
+    """`3:42:10` -> seconds. Hours, minutes and seconds, all three: `1:45` could mean two things."""
+    parts = text.strip().split(":")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        raise ValueError("`tiempo` must be H:MM:SS, for example 3:42:10")
+    hours, minutes, seconds = (int(p) for p in parts)
+    if minutes > 59 or seconds > 59 or not 0 < hours * 3600 + minutes * 60 + seconds <= 86400:
+        raise ValueError("`tiempo` must be H:MM:SS, for example 3:42:10")
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _clock(seconds: int) -> str:
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
 def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
@@ -1229,7 +1307,7 @@ class Toolbox:
         # Without somewhere to keep proposals and rules, the model is not offered the tool at all.
         self._schemas = SCHEMAS + [PREFERENCE_SCHEMA] if confirmations and preferences else SCHEMAS
         if confirmations:
-            self._schemas = self._schemas + RECEIPT_SCHEMAS + [APPLICATION_SCHEMA, ANNOUNCEMENT_SCHEMA]
+            self._schemas = self._schemas + RECEIPT_SCHEMAS + MEMBER_WRITE_SCHEMAS + [APPLICATION_SCHEMA, ANNOUNCEMENT_SCHEMA]
 
     @property
     def schemas(self) -> list[dict[str, Any]]:
@@ -1256,6 +1334,9 @@ class Toolbox:
             "comprobantes": lambda a, u: self._receipts(a, u, names),
             "revisar_comprobante": lambda a, u: self._review(a, u, names),
             "rechazar_comprobante": lambda a, u: self._propose_rejection(a, u, names),
+            "renovar_membresia": lambda a, u: self._propose_renewal(a, u, names),
+            "pausar_atleta": lambda a, u: self._propose_access(a, u, names),
+            "tiempo_carrera": lambda a, u: self._propose_race_time(a, u, names),
             "solicitudes": lambda a, u: self._applications(a, u, names),
             "revisar_solicitud": lambda a, u: self._review_application(a, u, names),
             "errores_garmin": lambda a, u: self._garmin_errors(a, u, names),
@@ -1765,6 +1846,112 @@ class Toolbox:
             summary,
             "Propuesta enviada al chat con los botones Rechazar y Cancelar. No está rechazado hasta que pulsen.",
             buttons=confirmations.buttons(action_id, "Rechazar"),
+        )
+
+    async def _propose_write(
+        self, telegram_user_id: int, summary: str, path: str, body: dict[str, Any], done: str, confirm: str, to_model: str
+    ) -> ToolResult:
+        """Show what would be written, with its buttons. The call is stored as shown; the click sends it."""
+        if self._confirmations is None:
+            return ToolResult(None, "No puedo proponer acciones en esta instalación.", is_error=True)
+        payload = {"path": path, "json": body, "done": done}
+        action_id = await self._confirmations.propose(telegram_user_id, "member_write", payload, summary)
+        return ToolResult(
+            summary,
+            f"{to_model} Propuesta enviada al chat con los botones {confirm} y Cancelar. No está hecho hasta que pulsen.".strip(),
+            buttons=confirmations.buttons(action_id, confirm),
+        )
+
+    async def _propose_renewal(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        months = args.get("meses")
+        if months not in (1, 3, 6) or isinstance(months, bool):
+            raise ValueError("`meses` must be 1, 3 or 6")
+        amount = args.get("monto")
+        if amount is not None:
+            if isinstance(amount, bool) or not isinstance(amount, (int, float)) or not 0 <= amount <= 1_000_000:
+                raise ValueError("`monto` must be an amount in pesos")
+            amount = float(amount)
+        paid = _iso_date(args, "fecha_pago")
+        reference = args.get("referencia")
+        if reference is not None:
+            reference = _text(args, "referencia", 2, 120)
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
+        data = await self._api.get(f"/assistant/athletes/{athlete_id}/renewal", telegram_user_id=telegram_user_id)
+        if data.get("pending_receipt"):
+            return ToolResult(
+                None,
+                f"No se puede: tiene el comprobante #{data['pending_receipt']} en revisión. Ese pago se aprueba con "
+                "`revisar_comprobante`, no se registra dos veces.",
+            )
+        plan = next(p for p in data["plans"] if p["months"] == months)
+        label = "1 mes" if months == 1 else f"{months} meses"
+        lines = [f"Renovar la membresía de {data['athlete']['name']}: {label}", f"Precio del plan: {_money(plan['price'])}"]
+        if amount is not None:
+            lines.append(f"Monto recibido: {_money(amount)}" + ("" if abs(amount - plan["price"]) < 0.005 else " (no coincide con el plan)"))
+        if paid:
+            lines.append(f"Fecha de pago: {_day_year(paid)}")
+        if reference:
+            lines.append(f"Referencia: {reference}")
+        lines.append(f"Hoy: {_coverage(data['membership'])}")
+        lines.append(f"Quedaría cubierto hasta {_day_year(plan['covers_until'])}")
+        body: dict[str, Any] = {"months": months}
+        body.update({k: v for k, v in (("amount", amount), ("paid", paid), ("reference", reference)) if v is not None})
+        return await self._propose_write(
+            telegram_user_id, "\n".join(lines), f"/assistant/athletes/{athlete_id}/renew", body, f"Renovada ({label})", "Renovar",
+            f"Plan de {label}: {_money(plan['price'])}; quedaría cubierto hasta {plan['covers_until']}.",
+        )
+
+    async def _propose_access(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        action = args.get("accion")
+        if action not in ("pausar", "reactivar"):
+            raise ValueError("`accion` must be pausar or reactivar")
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
+        profile = (await self._api.get(f"/assistant/athletes/{athlete_id}/profile", telegram_user_id=telegram_user_id))["athlete"]
+        if profile.get("archived"):
+            return ToolResult(None, "Está archivado: eso se maneja en la consola.")
+        pause = action == "pausar"
+        if profile.get("active", True) != pause:
+            return ToolResult(None, "Ya está pausado." if pause else "Ya está activo.")
+        summary = (
+            f"Pausar a {profile['name']}.\nDeja de poder entrar a la app hasta que se reactive."
+            if pause
+            else f"Reactivar a {profile['name']}.\nVuelve a poder entrar a la app."
+        )
+        return await self._propose_write(
+            telegram_user_id, summary, f"/assistant/athletes/{athlete_id}/access",
+            {"action": "pause" if pause else "reactivate"}, "Pausado" if pause else "Reactivado",
+            "Pausar" if pause else "Reactivar", "",
+        )
+
+    async def _propose_race_time(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        seconds = _seconds(str(args.get("tiempo") or ""))
+        wanted = _fold(_text(args, "evento")).split()
+        athlete_id = await self._pick(args, telegram_user_id, names)
+        if isinstance(athlete_id, ToolResult):
+            return athlete_id
+        data = await self._api.get(f"/assistant/athletes/{athlete_id}/events", telegram_user_id=telegram_user_id)
+        hits = [e for e in data["events"] if all(w in _fold(e["name"]) for w in wanted)]
+        if len(hits) != 1:
+            listed = "; ".join(f"{e['name']} ({e['date']})" for e in data["events"]) or "ninguno"
+            what = "varios eventos coinciden" if hits else "no está inscrito en un evento con ese nombre"
+            return ToolResult(None, f"No propuse nada: {what}. Está inscrito en: {listed}. Pregunta cuál.")
+        event = hits[0]
+        lines = [
+            f"Registrar {_clock(seconds)} a {data['athlete']['name']}",
+            f"Evento: {event['name']} ({_day_year(event['date'])})" if event.get("date") else f"Evento: {event['name']}",
+        ]
+        if event.get("goal"):
+            lines.append(f"Objetivo: {event['goal']}")
+        if event.get("result_sec"):
+            lines.append(f"Ya tenía registrado {_clock(event['result_sec'])}: se reemplaza.")
+        return await self._propose_write(
+            telegram_user_id, "\n".join(lines), f"/assistant/athletes/{athlete_id}/race-time",
+            {"event_id": event["id"], "seconds": seconds}, f"Tiempo registrado ({_clock(seconds)})", "Registrar",
+            f"Evento: {event['name']} ({event.get('date')}).",
         )
 
     async def _applications(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:

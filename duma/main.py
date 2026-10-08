@@ -417,6 +417,8 @@ class Bot:
             run = self._decide_receipt(pending.payload["receipt"], choice, user_id, who)
         elif status == "ok" and pending.kind == "announcement":
             run = self._send_announcement(pending.payload, user_id, who)
+        elif status == "ok" and pending.kind == "member_write":
+            run = self._write_member(pending.payload, user_id, who)
         elif status == "ok":
             outcome = self._execute(pending.kind, pending.payload, user_id)
         else:
@@ -592,6 +594,19 @@ class Bot:
             log.warning("deciding application %s failed: API status %s: %s", athlete_id, exc.status, exc.message)
             return f"No se pudo: {exc.message}"
         return f"{done} por {who}. Se le avisa por correo."
+
+    async def _write_member(self, payload: dict[str, Any], user_id: int, who: str) -> str:
+        """Renew, pause or record a race time: the call fixed when it was proposed, as whoever pressed."""
+        if self._api is None:
+            return NO_LONGER_VALID
+        try:
+            done = await self._api.write(payload["path"], telegram_user_id=user_id, json=payload["json"])
+        except ApiError as exc:
+            log.warning("%s failed: API status %s: %s", payload["path"], exc.status, exc.message)
+            return f"No se pudo: {exc.message}"
+        until = done.get("covered_until")
+        covered = f" Cubierto hasta {_day_year(until)}." if until else ""
+        return f"{payload['done']} por {who}.{covered}"
 
     async def _send_announcement(self, payload: dict[str, Any], user_id: int, who: str) -> str:
         """Hand an announcement to the API, for the list fixed when it was proposed. The API sends it afterwards."""

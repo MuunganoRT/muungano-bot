@@ -851,8 +851,9 @@ admins», abajo.
 `POST /assistant/applications/{id}/decide`, que por dentro es `update_user` de la consola. Grupo y nivel se quedan
 en la consola (su pantalla de solicitudes tampoco los pide).
 
-**Después, en este orden:** renovar membresía (en la consola, «Renovar membresía»: plan, monto recibido, fecha de
-pago y referencia; `POST /v2/membership`, `routers/receipts.py`), pausar o reactivar, tiempos de carrera.
+**Fase 4 — renovar membresía, pausar o reactivar y tiempos de carrera (escrita el 2026-10-08).**
+`renovar_membresia`, `pausar_atleta` y `tiempo_carrera`; cada una guarda la llamada al API en la propuesta
+(`member_write`) y el clic la manda. En el API llaman a las rutas de la consola como ese admin.
 
 **Fuera:** entrenos y plan, precios y descuentos, archivar y borrar.
 

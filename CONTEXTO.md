@@ -3,7 +3,7 @@
 Estado de lo **implementado y desplegado**. Lo que falta y las decisiones de diseño viven en [PLAN.md](PLAN.md).
 Se actualiza en cada commit: si el código cambia lo que dice este archivo, el mismo commit lo corrige.
 
-Última actualización: 2026-10-07.
+Última actualización: 2026-10-08.
 
 ## Qué es
 
@@ -64,7 +64,8 @@ semanal ni la cuenta regresiva de eventos, que son automáticos.
 
 ## Qué puede escribir
 
-Tres cosas: **decidir un comprobante**, **decidir una solicitud de ingreso** y **mandar un aviso**. En las tres el modelo solo propone: las rutas que
+Seis cosas: decidir un comprobante, decidir una solicitud de ingreso, mandar un aviso, renovar una membresía,
+pausar o reactivar a un atleta y registrar un tiempo de carrera. En todas el modelo solo propone: las rutas que
 escriben están en `WRITES` (`duma/api_client.py`) y solo las llama el manejador del botón (`duma/main.py`). La
 propuesta es de un solo uso, caduca (`BOT_CONFIRM_TTL_MIN`) y solo la decide quien la pidió. El API la registra como
 el usuario de consola ligado al Telegram de quien pulsó; hoy solo hay uno (`ASSISTANT_ADMINS` en
@@ -98,6 +99,18 @@ deshacer después: lo ejecutado se corrige en la consola. Si el bot se reinicia 
   `state/solicitudes.topic`. Esas tarjetas no las pidió nadie: las decide cualquier admin del grupo que el API
   reconozca y duran 60 días. Si Duma está caído cuando llega el aviso, esa tarjeta no se publica; la solicitud
   sigue saliendo en `solicitudes`.
+
+### Renovar, pausar y tiempos de carrera
+
+Las tres muestran una propuesta con su botón y «Cancelar»; la llamada al API queda guardada tal como se mostró y el
+clic la manda (`Bot._write_member`, `duma/main.py`).
+
+- `renovar_membresia`: el «Renovar membresía» de la consola, para un pago recibido fuera de la app. Muestra el plan
+  (1, 3 o 6 meses), el precio que pone el servidor, el monto recibido si lo dijeron, la referencia y hasta cuándo
+  quedaría cubierto. No procede si el atleta tiene un comprobante en revisión.
+- `pausar_atleta`: pausa o reactiva. No archiva ni trae de vuelta a un archivado.
+- `tiempo_carrera`: registra el tiempo final (H:MM:SS) en un evento al que el atleta está inscrito; si el nombre
+  coincide con varios o con ninguno, no propone y el modelo pregunta.
 
 ### Avisos por correo y push
 
@@ -144,4 +157,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (290 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (294 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.

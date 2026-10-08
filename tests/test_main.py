@@ -1301,3 +1301,28 @@ async def test_the_hook_door_takes_only_the_shared_token(tmp_path):
     await asyncio.sleep(0.05)
     assert got == [("application", {"athlete_id": 7})]
     server.close()
+
+
+# ── Renewing, pausing and race times: one stored call, sent by the click ──
+
+
+async def test_a_member_write_sends_the_stored_call_and_says_what_was_done(settings, tmp_path):
+    api = SendingApi({"success": True, "covered_until": "2026-12-31"})
+    bot, tg, store, _ = await with_preferences(settings, tmp_path)
+    bot._api = api
+    payload = {"path": "/assistant/athletes/10/renew", "json": {"months": 3}, "done": "Renovada (3 meses)"}
+    action = await store.propose(10, "member_write", payload, "Renovar la membresía de Ana Peña: 3 meses")
+
+    await bot.handle(named(click(f"ok:{action}")))
+    assert api.writes == [("/assistant/athletes/10/renew", 10, {"months": 3})]
+    assert tg.edits[-1][1].endswith("Renovada (3 meses) por Adrián. Cubierto hasta 31 dic 2026.")
+    await bot.handle(click(f"ok:{action}"))
+    assert len(api.writes) == 1
+
+    from duma.api_client import ApiError
+
+    bot._api = SendingApi(fail=ApiError(400, "Ya está pausado"))
+    payload = {"path": "/assistant/athletes/10/access", "json": {"action": "pause"}, "done": "Pausado"}
+    action = await store.propose(10, "member_write", payload, "Pausar a Ana Peña.")
+    await bot.handle(click(f"ok:{action}"))
+    assert tg.edits[-1] == (900, "Pausar a Ana Peña.\n\nNo se pudo: Ya está pausado")

@@ -145,6 +145,12 @@ async def test_a_write_route_is_reachable_only_through_write_and_a_file_only_thr
     await api.write("/assistant/applications/3/decide", telegram_user_id=1, json={"action": "wait"})
     await api.get("/assistant/applications", telegram_user_id=1)
     await api.get("/assistant/applications/3", telegram_user_id=1)
+    for tail in ("renew", "access", "race-time"):
+        with pytest.raises(ApiError, match="not allowed"):
+            await api.post(f"/assistant/athletes/3/{tail}", telegram_user_id=1, json={})
+        await api.write(f"/assistant/athletes/3/{tail}", telegram_user_id=1, json={})
+    await api.get("/assistant/athletes/3/renewal", telegram_user_id=1)
+    await api.get("/assistant/athletes/3/events", telegram_user_id=1)
     await api.get("/assistant/garmin/errors", telegram_user_id=1)
     await api.get("/assistant/messages", telegram_user_id=1)
     seen.clear()

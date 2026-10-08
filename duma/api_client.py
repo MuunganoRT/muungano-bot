@@ -21,7 +21,7 @@ ALLOWED = (
     ("GET", re.compile(r"^/assistant/athletes/\d+/summary$")),
     ("GET", re.compile(r"^/assistant/athletes/\d+/workouts$")),
     ("GET", re.compile(r"^/assistant/athletes/\d+/workouts/\d+/laps$")),
-    ("GET", re.compile(r"^/assistant/athletes/\d+/(payments|plan|profile)$")),
+    ("GET", re.compile(r"^/assistant/athletes/\d+/(payments|plan|profile|renewal|events)$")),
     ("GET", re.compile(r"^/assistant/receipts$")),
     ("GET", re.compile(r"^/assistant/receipts/\d+$")),
     ("GET", re.compile(r"^/assistant/applications$")),
@@ -41,6 +41,7 @@ WRITES = (
     ("POST", re.compile(r"^/assistant/receipts/\d+/decide$")),
     ("POST", re.compile(r"^/assistant/messages$")),
     ("POST", re.compile(r"^/assistant/applications/\d+/decide$")),
+    ("POST", re.compile(r"^/assistant/athletes/\d+/(renew|access|race-time)$")),
 )
 
 

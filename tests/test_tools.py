@@ -49,6 +49,9 @@ class FakeApi:
             return self.garmin
         if path == "/assistant/messages":
             return self.sent
+        for tail in ("renewal", "events"):
+            if path.endswith("/" + tail):
+                return getattr(self, tail)
         for tail in ("plan", "payments", "profile", "receipts"):
             if path.endswith("/" + tail):
                 return getattr(self, tail)
@@ -1042,6 +1045,101 @@ async def test_a_rejection_with_its_own_reason_is_only_proposed(tmp_path):
     _, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
     assert pending.payload == {"receipt": 6, "decision": {"accion": "rechazar", "motivo": reason}}
     assert (await box.run("rechazar_comprobante", {"comprobante": 6, "motivo": "no"}, 956)).is_error
+
+
+RENEWAL = {
+    "success": True,
+    "athlete": {"id": 10, "name": "Ana Peña"},
+    "membership": {"covered_until": "2026-09-30", "paid": False},
+    "pending_receipt": None,
+    "plans": [
+        {"months": 1, "price": 1200.0, "covers_until": "2026-10-31"},
+        {"months": 3, "price": 3240.0, "covers_until": "2026-12-31"},
+        {"months": 6, "price": 6120.0, "covers_until": "2027-03-31"},
+    ],
+}
+EVENTS = {
+    "success": True,
+    "athlete": {"id": 10, "name": "Ana Peña"},
+    "events": [
+        {"id": 1, "name": "Maratón de Chicago", "date": "2026-10-11", "main": True, "goal": "3:45:00", "result_sec": None},
+        {"id": 2, "name": "Maratón de Chicago", "date": "2025-10-12", "main": False, "goal": None, "result_sec": 13500},
+        {"id": 3, "name": "21K Monterrey", "date": "2026-03-01", "main": False, "goal": None, "result_sec": 6000},
+    ],
+}
+
+
+async def member_box(tmp_path, **replies):
+    from duma.pseudonyms import Pseudonyms
+
+    api, names = FakeApi([{"id": 10, "name": "Ana Peña", "group": "Maratón", "active": True}]), Pseudonyms()
+    for key, value in replies.items():
+        setattr(api, key, value)
+    box, store = await box_with_buttons(api, tmp_path)
+    return api, names, box, store
+
+
+async def test_renewing_is_proposed_with_the_servers_price_and_what_it_would_cover(tmp_path):
+    api, names, box, store = await member_box(tmp_path, renewal=RENEWAL)
+    args = {"nombre": "Ana Peña", "meses": 3, "monto": 3000, "referencia": "Efectivo"}
+    r = await box.run("renovar_membresia", args, 956, names)
+    assert r.direct_text.splitlines() == [
+        "Renovar la membresía de Ana Peña: 3 meses",
+        "Precio del plan: $3,240 MXN",
+        "Monto recibido: $3,000 MXN (no coincide con el plan)",
+        "Referencia: Efectivo",
+        "Hoy: " + r.direct_text.splitlines()[4][5:],
+        "Quedaría cubierto hasta 31 dic 2026",
+    ]
+    assert [label for label, _ in r.buttons] == ["Renovar", "Cancelar"]
+    assert "Ana" not in r.to_model and "No está hecho" in r.to_model
+    _, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
+    assert (pending.kind, pending.payload) == ("member_write", {
+        "path": "/assistant/athletes/10/renew",
+        "json": {"months": 3, "amount": 3000.0, "reference": "Efectivo"},
+        "done": "Renovada (3 meses)",
+    })
+
+    assert (await box.run("renovar_membresia", {"nombre": "Ana Peña", "meses": 2}, 956, names)).is_error
+    api.renewal = {**RENEWAL, "pending_receipt": 6}
+    r = await box.run("renovar_membresia", {"nombre": "Ana Peña", "meses": 1}, 956, names)
+    assert r.buttons is None and "comprobante #6" in r.to_model
+
+
+async def test_pausing_is_proposed_only_when_it_changes_something(tmp_path):
+    profile = {"success": True, "athlete": {"id": 10, "name": "Ana Peña", "active": True, "archived": False}}
+    api, names, box, store = await member_box(tmp_path, profile=profile)
+    r = await box.run("pausar_atleta", {"nombre": "Ana Peña", "accion": "pausar"}, 956, names)
+    assert r.direct_text.splitlines()[0] == "Pausar a Ana Peña." and [b[0] for b in r.buttons] == ["Pausar", "Cancelar"]
+    _, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
+    assert pending.payload == {"path": "/assistant/athletes/10/access", "json": {"action": "pause"}, "done": "Pausado"}
+
+    r = await box.run("pausar_atleta", {"nombre": "Ana Peña", "accion": "reactivar"}, 956, names)
+    assert r.buttons is None and r.to_model == "Ya está activo."
+    api.profile = {"success": True, "athlete": {"id": 10, "name": "Ana Peña", "active": False, "archived": True}}
+    r = await box.run("pausar_atleta", {"nombre": "Ana Peña", "accion": "reactivar"}, 956, names)
+    assert r.buttons is None and "archivado" in r.to_model
+    assert (await box.run("pausar_atleta", {"nombre": "Ana Peña", "accion": "archivar"}, 956, names)).is_error
+
+
+async def test_a_race_time_needs_one_event_and_a_full_time(tmp_path):
+    api, names, box, store = await member_box(tmp_path, events=EVENTS)
+    r = await box.run("tiempo_carrera", {"nombre": "Ana Peña", "evento": "monterrey", "tiempo": "1:38:05"}, 956, names)
+    assert r.direct_text.splitlines() == [
+        "Registrar 1:38:05 a Ana Peña",
+        "Evento: 21K Monterrey (1 mar 2026)",
+        "Ya tenía registrado 1:40:00: se reemplaza.",
+    ]
+    _, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
+    assert pending.payload == {
+        "path": "/assistant/athletes/10/race-time", "json": {"event_id": 3, "seconds": 5885}, "done": "Tiempo registrado (1:38:05)",
+    }
+
+    # Two editions of Chicago: the model has to ask which.
+    r = await box.run("tiempo_carrera", {"nombre": "Ana Peña", "evento": "chicago", "tiempo": "3:42:10"}, 956, names)
+    assert r.buttons is None and "varios eventos coinciden" in r.to_model and "2025-10-12" in r.to_model
+    for bad in ("1:45", "3:70:00", "tres horas", "0:00:00"):
+        assert (await box.run("tiempo_carrera", {"nombre": "Ana Peña", "evento": "chicago", "tiempo": bad}, 956, names)).is_error
 
 
 APPLICATIONS = {
