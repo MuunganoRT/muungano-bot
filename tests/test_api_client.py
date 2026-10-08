@@ -133,6 +133,17 @@ async def test_a_write_route_is_reachable_only_through_write_and_a_file_only_thr
         await api.write("/assistant/athletes/query", telegram_user_id=1, json={})
     assert seen == []
 
+    with pytest.raises(ApiError, match="not allowed"):
+        await api.post("/assistant/messages", telegram_user_id=1, json={})
+    with pytest.raises(ApiError, match="not allowed"):
+        await api.write("/assistant/messages/preview", telegram_user_id=1, json={})
+    assert seen == []
+    await api.post("/assistant/messages/preview", telegram_user_id=1, json={"everyone": True})
+    await api.write("/assistant/messages", telegram_user_id=1, json={})
+    await api.get("/assistant/garmin/errors", telegram_user_id=1)
+    await api.get("/assistant/messages", telegram_user_id=1)
+    seen.clear()
+
     assert (await api.write("/assistant/receipts/12/decide", telegram_user_id=1, json=body))["data"]
     assert await api.get_file("/assistant/receipts/12/file", telegram_user_id=1) == (b"\xff\xd8", "image/jpeg")
     await api.get("/assistant/receipts/12", telegram_user_id=1)

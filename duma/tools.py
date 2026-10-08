@@ -6,11 +6,16 @@ a chart drawn by `charts`, and the model gets back only a short acknowledgement
 with no names in it. `cifras`, `catalogo` and `consultar` answer the model:
 with totals, which identify nobody; with the names of groups and events; and
 with one row per person where the name is a code. `entrenos_atleta` and
-`vueltas_entreno`, `plan_atleta`, `pagos_atleta`, `perfil_atleta` and
-`comprobantes` do both: the chat gets a table drawn by `charts` (or a CSV, an
-album of tables, or a short card), with names on it, and the model gets the
-same figures with no name at all, or with a code in its place. Either way the model never reads a person's name
-it was not given by the admin.
+`vueltas_entreno`, `plan_atleta`, `pagos_atleta`, `perfil_atleta`,
+`comprobantes`, `errores_garmin` and `avisos_enviados` do both: the chat gets a
+table drawn by `charts` (or a CSV, an album of tables, or a short card), with
+names on it, and the model gets the same figures with no name at all, or with a
+code in its place. Either way the model never reads a person's name it was not
+given by the admin.
+
+The tools that propose (`revisar_comprobante`, `rechazar_comprobante`,
+`proponer_aviso`, `guardar_preferencia`) change nothing: they store what would
+run and show it with buttons. The click runs it, in `duma.main`.
 """
 
 from __future__ import annotations
@@ -450,7 +455,87 @@ SCHEMAS: list[dict[str, Any]] = [
             "required": ["metrica"],
         },
     },
+    {
+        "name": "errores_garmin",
+        "description": (
+            "Entrenos que no llegaron al reloj porque Garmin los rechazó: manda al chat la tabla (fecha, atleta, tipo, "
+            "si se sigue reintentando e intentos; el error completo solo va en el CSV) y te devuelve el total, cuántos atletas, los motivos agrupados y las filas con "
+            "códigos en vez de nombres. `desde` y `hasta` son la fecha del entreno; sin ellas, de hace una semana a "
+            "dos semanas adelante. No incluye a quien no tiene reloj vinculado: a esos no se les intenta publicar "
+            "(búscalos con el filtro de perfil `reloj: false`)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "desde": {"type": "string", "description": "YYYY-MM-DD."},
+                "hasta": {"type": "string", "description": "YYYY-MM-DD."},
+                "formato": {
+                    "type": "string",
+                    "enum": ["auto", "imagen", "csv"],
+                    "description": "Igual que en `entrenos_atleta`: `imagen` o `csv` solo si el administrador lo pidió.",
+                },
+            },
+        },
+    },
+    {
+        "name": "avisos_enviados",
+        "description": (
+            "Avisos que se mandaron por correo o push desde la consola o desde aquí: manda al chat la tabla con fecha, "
+            "canal, asunto, destinatarios y cuántos aceptó el proveedor, y te devuelve las mismas cifras sin el asunto "
+            "(es texto que escribió una persona). «Aceptado» es que Apple, Google o el servidor de correo lo "
+            "recibieron, no que alguien lo leyó. No incluye el resumen semanal ni la cuenta regresiva de eventos, "
+            "que son automáticos. Sin fechas, los últimos 30 días."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "desde": {"type": "string", "description": "YYYY-MM-DD."},
+                "hasta": {"type": "string", "description": "YYYY-MM-DD."},
+                "formato": {
+                    "type": "string",
+                    "enum": ["auto", "imagen", "csv"],
+                    "description": "Igual que en `entrenos_atleta`: `imagen` o `csv` solo si el administrador lo pidió.",
+                },
+            },
+        },
+    },
 ]
+
+ANNOUNCEMENT_SCHEMA: dict[str, Any] = {
+    "name": "proponer_aviso",
+    "description": (
+        "Propone mandar un aviso por correo, push o ambos. NO lo manda: muestra al administrador el texto completo, "
+        "a cuántos atletas llega, por qué canal, y la lista como archivo, con los botones Enviar y Cancelar. Solo "
+        "sale si pulsan Enviar; después de llamarla no digas que se envió. Un aviso enviado no se puede retirar.\n"
+        "La audiencia siempre son atletas activos y hay que decirla de una de tres formas: `todos: true` (solo si el "
+        "administrador dijo expresamente que es para todos; si no lo dijo, pregúntale), `filtros` (los mismos de "
+        "`buscar_atletas`: grupo, evento, membresía, perfil, faltas…) y/o `atletas` (códigos ATLETA_NN de personas "
+        "que ya buscaste con `buscar_atleta`). `filtros` y `atletas` se suman. Si un grupo no coincide con ninguno, "
+        "la herramienta te lo dice: pregunta con `preguntar` cuál es, no adivines.\n"
+        "`asunto` y `mensaje` son lo que el administrador te dictó: corrige ortografía si acaso, no agregues datos "
+        "ni promesas que no dijo. Si no dijo el canal, pregúntale."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "asunto": {"type": "string", "description": "Título del aviso, máximo 45 caracteres."},
+            "mensaje": {"type": "string", "description": "El texto del aviso, tal como lo recibirán."},
+            "canal": {"type": "string", "enum": ["correo", "push", "ambos"]},
+            "todos": {"type": "boolean", "description": "true = todos los atletas activos. Va solo, sin filtros."},
+            "filtros": FILTERS_SCHEMA,
+            "atletas": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Códigos ATLETA_NN de personas concretas.",
+            },
+            "categoria": {
+                "type": "string",
+                "description": "Categoría del aviso, si el administrador nombró una. Sin ella va la general.",
+            },
+        },
+        "required": ["asunto", "mensaje", "canal"],
+    },
+}
 
 RECEIPT_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -792,6 +877,48 @@ RECEIPT_COLUMNS = [
 ]
 
 
+GARMIN_COLUMNS = [
+    ("Fecha", 1.3, "left"), ("Atleta", 3.6, "left"), ("Tipo", 2.6, "left"), ("Estado", 2.2, "left"),
+    ("Intentos", 1.1, "right"),
+]
+NAME_CELL = 26
+MESSAGE_COLUMNS = [
+    ("Fecha", 1.3, "left"), ("Canal", 1.0, "left"), ("Asunto", 3.4, "left"), ("Para", 1.0, "right"),
+    ("Aceptados", 1.6, "right"), ("Fallidos", 1.5, "right"), ("Sin destino", 1.8, "right"),
+]
+CHANNEL_NAMES = {"email": "correo", "push": "push"}
+CHANNELS = {"correo": "email", "push": "push", "ambos": "both"}
+SUBJECT_MAX = 45
+# The card is one Telegram message, rewritten with the outcome once decided: it has to fit in 4096.
+ANNOUNCEMENT_MAX = 3000
+NAMES_ON_CARD = 10
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _delivery_cells(message: dict[str, Any]) -> list[str]:
+    d = message["delivery"]
+    failed = d["failed"] + d["rejected"]
+    return [str(message["recipients"]), str(d["accepted"]), str(failed), str(d["no_destination"])]
+
+
+def _audience_line(found: dict[str, Any], everyone: bool, named: int) -> str:
+    """Who an announcement goes to, in the words of the card."""
+    matched = found.get("matched") or {}
+    parts = []
+    if everyone:
+        parts.append("todos los activos")
+    if matched.get("groups"):
+        parts.append("grupos " + ", ".join(matched["groups"]))
+    if matched.get("events"):
+        parts.append("eventos " + ", ".join(matched["events"]))
+    if named:
+        parts.append(f"{named} nombrado(s) uno por uno")
+    return " · ".join(parts) or "los que cumplen los filtros"
+
+
 def _plan_cells(workout: dict[str, Any], blank: str = charts.EMPTY_CELL) -> list[str]:
     """One day of a plan as table cells. What is still ahead shows the estimate, marked with `~`."""
     done = workout["status"] == "done"
@@ -1027,7 +1154,7 @@ class Toolbox:
         # Without somewhere to keep proposals and rules, the model is not offered the tool at all.
         self._schemas = SCHEMAS + [PREFERENCE_SCHEMA] if confirmations and preferences else SCHEMAS
         if confirmations:
-            self._schemas = self._schemas + RECEIPT_SCHEMAS
+            self._schemas = self._schemas + RECEIPT_SCHEMAS + [ANNOUNCEMENT_SCHEMA]
 
     @property
     def schemas(self) -> list[dict[str, Any]]:
@@ -1054,6 +1181,9 @@ class Toolbox:
             "comprobantes": lambda a, u: self._receipts(a, u, names),
             "revisar_comprobante": lambda a, u: self._review(a, u, names),
             "rechazar_comprobante": lambda a, u: self._propose_rejection(a, u, names),
+            "errores_garmin": lambda a, u: self._garmin_errors(a, u, names),
+            "avisos_enviados": self._sent_messages,
+            "proponer_aviso": lambda a, u: self._propose_announcement(a, u, names),
         }
         handlers["resumen_atleta"] = lambda a, u: self._summary(a, u, names)
         if self._confirmations and self._preferences:
@@ -1558,6 +1688,173 @@ class Toolbox:
             summary,
             "Propuesta enviada al chat con los botones Rechazar y Cancelar. No está rechazado hasta que pulsen.",
             buttons=confirmations.buttons(action_id, "Rechazar"),
+        )
+
+    async def _garmin_errors(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        if start and end and start > end:
+            raise ValueError("`desde` is after `hasta`")
+        layout = _format(args)
+        params = {key: value for key, value in (("from", start), ("to", end)) if value}
+        data = await self._api.get("/assistant/garmin/errors", telegram_user_id=telegram_user_id, params=params)
+        period = _period(data["period"]["from"], data["period"]["to"])
+        workouts = data["workouts"]
+        if not workouts:
+            return ToolResult(None, f"Ningún entreno rechazado por Garmin con fecha {period}.")
+        names = names if names is not None else Pseudonyms()
+
+        def state(w: dict[str, Any]) -> str:
+            return "ya no se intenta" if w["gave_up"] else "se reintenta"
+
+        reasons = "\n".join(
+            f"- {r['workouts']} entreno(s) de {r['athletes']} atleta(s): {_clip(r['error'], 160)}" for r in data["reasons"]
+        )
+        left = f" Van solo los primeros {len(workouts)}." if data.get("truncated") else ""
+        to_model = (
+            f"{data['total']} entreno(s) de {data['athletes']} atleta(s) sin llegar al reloj, con fecha {period}.{left}\n"
+            f"Motivos:\n{reasons}\nFilas (atleta | fecha | tipo | intentos | estado):\n"
+            + "\n".join(
+                f"{names.code(w['athlete']['id'], w['athlete']['name'])} | {w['date']} | {w['type'] or '?'} | "
+                f"{w['attempts']} | {state(w)}"
+                for w in workouts
+            )
+        )
+        return await self._deliver(
+            layout,
+            "errores_garmin",
+            "Garmin",
+            f"{data['total']} entrenos sin llegar al reloj" if data["total"] != 1 else "1 entreno sin llegar al reloj",
+            f"{data['athletes']} atleta(s)  ·  {period}",
+            GARMIN_COLUMNS,
+            [
+                [
+                    _day(w["date"]) if w["date"] else charts.EMPTY_CELL, _clip(w["athlete"]["name"], NAME_CELL),
+                    _clip(w["type"] or charts.EMPTY_CELL, 20), state(w), str(w["attempts"]),
+                ]
+                for w in workouts
+            ],
+            ["Fecha", "Atleta", "Tipo", "Intentos", "Estado", "Error"],
+            [[w["date"] or "", w["athlete"]["name"], w["type"] or "", w["attempts"], state(w), w["error"]] for w in workouts],
+            to_model,
+        )
+
+    async def _sent_messages(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        start, end = _iso_date(args, "desde"), _iso_date(args, "hasta")
+        if start and end and start > end:
+            raise ValueError("`desde` is after `hasta`")
+        layout = _format(args)
+        params = {key: value for key, value in (("from", start), ("to", end)) if value}
+        data = await self._api.get("/assistant/messages", telegram_user_id=telegram_user_id, params=params)
+        period = _period(data["period"]["from"], data["period"]["to"])
+        sent = data["messages"]
+        if not sent:
+            return ToolResult(None, f"Ningún aviso enviado {period}.")
+        left = f" Van solo los {len(sent)} más recientes." if data.get("truncated") else ""
+
+        def channel(m: dict[str, Any]) -> str:
+            return CHANNEL_NAMES.get(m["channel"], "?")
+
+        to_model = (
+            f"{data['total']} aviso(s) enviados {period}.{left} El asunto salió al chat; tú no lo ves.\n"
+            "Filas (fecha | canal | categoría | destinatarios | aceptados | fallidos | sin destino | omitidos):\n"
+            + "\n".join(
+                f"{m['date']} | {channel(m)} | {m['category'] or '?'} | " + " | ".join(_delivery_cells(m))
+                + f" | {m['delivery']['skipped']}"
+                for m in sent
+            )
+        )
+        return await self._deliver(
+            layout,
+            "avisos",
+            "Avisos",
+            f"{data['total']} avisos enviados" if data["total"] != 1 else "1 aviso enviado",
+            period + (f"  ·  los {len(sent)} más recientes" if data.get("truncated") else ""),
+            MESSAGE_COLUMNS,
+            [[_day(m["date"]) if m["date"] else charts.EMPTY_CELL, channel(m), _clip(m["subject"], NAME_CELL), *_delivery_cells(m)] for m in sent],
+            ["Fecha", "Canal", "Categoría", "Asunto", "Destinatarios", "Aceptados", "Fallidos", "Sin destino", "Omitidos"],
+            [
+                [m["date"] or "", channel(m), m["category"] or "", m["subject"], *_delivery_cells(m), m["delivery"]["skipped"]]
+                for m in sent
+            ],
+            to_model,
+        )
+
+    async def _propose_announcement(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:
+        if self._confirmations is None:
+            return ToolResult(None, "No puedo proponer acciones en esta instalación.", is_error=True)
+        subject = _text(args, "asunto", 3, SUBJECT_MAX)
+        message = _text(args, "mensaje", 5, ANNOUNCEMENT_MAX)
+        channel = args.get("canal")
+        if channel not in CHANNELS:
+            raise ValueError("`canal` must be correo, push or ambos")
+        everyone = args.get("todos") is True
+        filters = _filters(args)
+        codes = args.get("atletas") or []
+        if not isinstance(codes, list) or len(codes) > 200:
+            raise ValueError("`atletas` must be a list of at most 200 ATLETA_NN codes")
+        ids = []
+        for code in codes:
+            known = names.athlete_id(str(code)) if names else None
+            if known is None:
+                raise ValueError(f"I do not know {code!r}: look the person up with `buscar_atleta` first")
+            ids.append(known)
+        if everyone and (filters or ids):
+            raise ValueError("`todos` goes alone: drop it, or drop `filtros` and `atletas`")
+        if not (everyone or filters or ids):
+            raise ValueError("Say who it is for: `todos`, `filtros` or `atletas`. If the admin did not say, ask.")
+
+        body: dict[str, Any] = {"filters": filters, "athlete_ids": ids, "everyone": everyone}
+        found = await self._api.post("/assistant/messages/preview", telegram_user_id=telegram_user_id, json=body)
+        if found.get("notes"):
+            # A name that matched nothing: sending to the rest would not be what was asked.
+            return ToolResult(None, "No propuse nada." + _understood(found) + " Pregunta al administrador cuál quiso decir.")
+        audience = found["athletes"]
+        if not audience:
+            return ToolResult(None, "Nadie activo cumple eso: no hay a quién mandarlo." + _understood(found))
+
+        category = None
+        wanted = args.get("categoria")
+        if isinstance(wanted, str) and wanted.strip():
+            hits = [c for c in found["categories"] if _fold(wanted.strip()) in _fold(c["name"] or "")]
+            if len(hits) != 1:
+                options = ", ".join(c["name"] or "?" for c in found["categories"])
+                raise ValueError(f"No single category matches {wanted!r}. The categories are: {options}")
+            category = hits[0]
+
+        total, reach = found["total"], found["reach"]
+        via = {"email": "correo", "push": "push", "both": "correo y push"}[CHANNELS[channel]]
+        lines = [f"Aviso por {via} a {total} atleta(s) activo(s) · {_audience_line(found, everyone, len(ids))}"]
+        if CHANNELS[channel] != "email":
+            lines.append(f"Push: {reach['push']} con la app en su teléfono; {total - reach['push']} no lo recibirán por ahí.")
+        if CHANNELS[channel] != "push":
+            lines.append(f"Correo: {reach['email']} con dirección.")
+        if found.get("not_active"):
+            lines.append(f"{found['not_active']} de los nombrados no están activos y no lo reciben.")
+        if total <= NAMES_ON_CARD:
+            lines.append("Para: " + ", ".join(a["name"] for a in audience) + ".")
+        if category:
+            lines.append(f"Categoría: {category['name']}.")
+        lines += ["", f"Asunto: {subject}", "", message]
+        summary = "\n".join(lines)
+
+        payload: dict[str, Any] = {
+            "user_ids": [a["id"] for a in audience], "subject": subject, "message": message, "channel": CHANNELS[channel],
+        }
+        if category:
+            payload["category_id"] = category["id"]
+        action_id = await self._confirmations.propose(telegram_user_id, "announcement", payload, summary)
+        listing = table_csv(
+            ["Nombre", "Grupo", "Push", "Correo"],
+            [[a["name"], a.get("group") or "", "sí" if a["push"] else "no", "sí" if a["email"] else "no"] for a in audience],
+        )
+        where = "La lista salió como archivo." if total > NAMES_ON_CARD else "Los nombres van en la tarjeta."
+        return ToolResult(
+            summary,
+            f"Propuesta enviada al chat con los botones Enviar y Cancelar: {total} atleta(s) activo(s), {reach['push']} con "
+            f"push y {reach['email']} con correo. {where} No está enviado hasta que pulsen."
+            + _understood(found),
+            files=[OutFile("destinatarios.csv", listing)] if total > NAMES_ON_CARD else [],
+            buttons=confirmations.buttons(action_id, "Enviar"),
         )
 
     async def _profile(self, args: dict[str, Any], telegram_user_id: int, names: Optional[Pseudonyms]) -> ToolResult:

@@ -64,8 +64,8 @@ haga las consultas previas que necesite y, si queda duda, pregunte. Es regla gen
 1. El menú de comandos al escribir `/` le aparece a Alex en el iPhone y no en la Mac. Comprobado en producción con
    `getMyCommands`: los seis comandos están en el alcance `chat` del grupo y en ningún otro. Es el cliente de Mac;
    si reiniciarlo no basta, registrarlos también en el alcance `default`.
-2. Fase 3, newsletter (sección 5): job en el API, tabla de noticias del team, banco de frases y envío con
-   confirmación. Las confirmaciones con botones ya existen (`duma/confirmations.py`).
+2. Newsletter (sección 5): detenido hasta definirlo con los admins; ver «Por definir con los admins» en la
+   sección 11.
 
 **Sin ver en Telegram, y no se va a probar a propósito** (decisión de Alex, 2026-10-07: si algo falla, él avisa):
 las tres gráficas, `catalogo`, las preguntas con botones y los botones de nombres ambiguos. Todo pasó sus pruebas
@@ -335,7 +335,7 @@ Reglas:
 
 ---
 
-## 5. Newsletter mensual — por el API
+## 5. Newsletter mensual — por el API (propuesta; sin desarrollar, por definir con los admins)
 
 El envío vive en el API, que ya tiene los dos canales y el patrón de un job que arma un mensaje por atleta:
 - Job de ejemplo: `muungano-api/jobs/resumen_semanal.py` (recap semanal por socio, cron, hora de Monterrey) *(verificado)*.
@@ -652,7 +652,7 @@ modelo encima de ellas pueden fallar.
 - [x] Gráficas de datos (`charts.py` y la herramienta `grafica`, 2026-10-06): detalle en la sección 0 — *probada
       contra el API local; falta en el grupo*
 
-### Fase 3 — Newsletter
+### Fase 3 — Newsletter (detenida: por definir con los admins)
 
 - [ ] `jobs/newsletter_mensual.py` y plantilla de correo en el API
 - [ ] Tabla de noticias del team y `POST /assistant/team-news`
@@ -727,7 +727,7 @@ Cambios:
 5. `prompts/system.md`: cuándo pedir `imagen` o `csv`.
 6. Pruebas en `tests/test_tools.py`, `test_charts.py`, `test_telegram_api.py`, `test_main.py`.
 
-### Más rutas de lectura para Duma (fase A escrita el 2026-10-07; fase B sin implementar)
+### Más rutas de lectura para Duma (fases A y B escritas el 2026-10-07)
 
 Se descartó darle SQL: las definiciones (activo, fecha de pago, score) viven en Python y el modelo vería nombres y
 contacto. Se amplía `/assistant/*`, que ya es un router aparte con su propio token y reutiliza `routers.reports` y
@@ -753,6 +753,10 @@ edad, con o sin reloj) y `missed` (al menos N entrenos prescritos sin hacer en u
 | `GET /assistant/garmin/errors` (periodo) | a quién no le llegaron entrenos al reloj y por qué | `errores_garmin` |
 | `GET /assistant/messages` (periodo) | avisos enviados y cuántos aceptó cada canal | `avisos` |
 
+Las dos viven en `routers/assistant_ops.py`. `errores_garmin` da los entrenos sin publicar cuyo último intento
+falló (`workouts_users.garmin_error`), no a quien no tiene reloj vinculado. `avisos` es la bitácora de la consola:
+solo envíos medidos. El asunto de un aviso lo escribió una persona: sale al chat y al CSV, no al modelo.
+
 Fuera: convenios y notas del calendario (contenido fijo, nadie lo pregunta) y el texto del entreno que escribe el coach.
 
 Orden: API en `dev` con pruebas → CI → `main` → bot (si el bot sube antes, las herramientas nuevas contestan 404).
@@ -764,7 +768,7 @@ Decisiones de la fase A: el filtro de perfil no filtra por edad (la fecha de nac
 el perfil da solo «unos N años» por el año). La meta del cuestionario y el motivo de rechazo son texto que escribió
 una persona: salen al chat y al CSV, nunca al modelo. Un beneficio pendiente no trae meses (los elige quien aprueba).
 
-### Escrituras desde Telegram (fase 1 escrita el 2026-10-07; lo demás sin implementar)
+### Escrituras desde Telegram (fases 1 y 2 escritas el 2026-10-07)
 
 Reglas de todas (las de la sección 4, que ya están en código para las preferencias: `duma/confirmations.py`, tabla
 `duma.pending`): nada se ejecuta sin botón, el botón es de un solo uso y caduca, lo mostrado es lo que se ejecuta, y
@@ -827,13 +831,43 @@ La audiencia se dice con los filtros que ya existen y se fija antes de confirmar
 - **La lista se congela** al proponer: los ids se guardan en `duma.pending` y el envío usa esos, no vuelve a filtrar.
 
 API: `POST /assistant/messages/preview` (filtros → conteo, alcance por canal, lista) y `POST /assistant/messages`
-(ids, asunto, mensaje, canal), sobre el envío de la consola (`send_message`, `routers/catalog.py:588`). El asunto
-cabe en 45 caracteres (columna `messages.asunto`). El newsletter (sección 5) es este mismo envío con plantilla.
+(ids, asunto, mensaje, canal), sobre el envío de la consola (`deliver`, `routers/catalog.py`). El asunto
+cabe en 45 caracteres (columna `messages.asunto`).
+
+Como quedó (avisos): herramienta `proponer_aviso`; el clic en «Enviar» llama a `Bot._send_announcement`
+(`duma/main.py`). «Activo» es `active(require_watch=False, exclude_blocked=True)` (`services/membership.py`). Además
+de filtros se pueden nombrar personas (`atletas`, por código); se suman. Si un nombre de grupo no coincide, no se
+propone nada. `ambos` son dos envíos y dos filas en la bitácora. El API contesta en cuanto acepta el envío y lo
+hace después (`_send`, `routers/assistant_ops.py`): el bot solo dice «envió la solicitud al servidor». El resultado
+por canal se consulta con `avisos_enviados`.
+
+**El newsletter no es esto.** Los avisos mandan el mismo texto a todos, como la pantalla de Avisos de la consola.
+El newsletter mensual por atleta (sección 5) es un pedido aparte y está sin desarrollar: ver «Por definir con los
+admins», abajo.
 
 **Después, en este orden:** pago en efectivo (`POST /v2/membership`, `routers/receipts.py:639`), solicitudes nuevas
 (aceptar, lista de espera, rechazar, con grupo y nivel), pausar o reactivar, tiempos de carrera.
 
 **Fuera:** entrenos y plan, precios y descuentos, archivar y borrar.
+
+---
+
+### Por definir con los admins
+
+**Newsletter mensual por atleta.** Pedido original (texto que pasó Alex el 2026-10-01): «crea un Newsletter mensual
+individual para cada atleta. Incluye los siguientes packruun "tal lugar tal fecha…", si tienen un evento incluye
+un T - "Su evento" y un mensaje motivacional. Incluye un training Recap de su mes terminado "24/26 Workouts, score
+promedio, kms totales" y tipo news generales del team». Es adicional a los avisos y no hay nada escrito en código.
+La sección 5 es una propuesta de cómo hacerlo, no una decisión. Falta que digan:
+
+- quién escribe el mensaje motivacional y las noticias de cada mes (ellos, o Duma lo redacta y ellos lo aprueban);
+- cuándo se manda y a quién (todos los activos o por grupo);
+- por qué canal (correo, push o ambos) y si quieren ver una muestra antes de confirmar.
+
+Idea de Alex (2026-10-07): un tema «Newsletter» en el grupo donde Duma lo recuerde y se deje programado.
+
+**Segundo admin que puede escribir.** `ASSISTANT_ADMINS` (`muungano-api/security.py`) solo tiene a José Adrián. Falta
+el id de Telegram y el usuario de consola de la otra persona.
 
 ---
 

@@ -24,9 +24,12 @@ ALLOWED = (
     ("GET", re.compile(r"^/assistant/athletes/\d+/(payments|plan|profile)$")),
     ("GET", re.compile(r"^/assistant/receipts$")),
     ("GET", re.compile(r"^/assistant/receipts/\d+$")),
+    ("GET", re.compile(r"^/assistant/garmin/errors$")),
+    ("GET", re.compile(r"^/assistant/messages$")),
     ("POST", re.compile(r"^/assistant/athletes/query$")),
     ("POST", re.compile(r"^/assistant/athletes/aggregate$")),
     ("POST", re.compile(r"^/assistant/athletes/series$")),
+    ("POST", re.compile(r"^/assistant/messages/preview$")),
 )
 # A member's bank document: fetched to show it to the admin, never handed to the model.
 FILES = (("GET", re.compile(r"^/assistant/receipts/\d+/file$")),)
@@ -34,6 +37,7 @@ FILES = (("GET", re.compile(r"^/assistant/receipts/\d+/file$")),)
 # is called from `Bot._on_button` and from no tool of the model.
 WRITES = (
     ("POST", re.compile(r"^/assistant/receipts/\d+/decide$")),
+    ("POST", re.compile(r"^/assistant/messages$")),
 )
 
 

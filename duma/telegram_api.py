@@ -19,6 +19,7 @@ MAX_MESSAGE = 4000
 MAX_CAPTION = 1000
 # What Telegram takes in one album.
 MAX_ALBUM = 10
+CALLBACK_MAX = 200
 
 
 class TelegramError(Exception):
@@ -217,4 +218,5 @@ class Telegram:
         await self._call("leaveChat", {"chat_id": chat_id})
 
     async def answer_callback_query(self, callback_query_id: str, text: str = "") -> None:
-        await self._call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text})
+        # Telegram refuses a longer one, and the full text is in the rewritten message anyway.
+        await self._call("answerCallbackQuery", {"callback_query_id": callback_query_id, "text": text[:CALLBACK_MAX]})

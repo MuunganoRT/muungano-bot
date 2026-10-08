@@ -377,6 +377,8 @@ class Bot:
         elif status == "ok" and pending.kind in RECEIPT_KINDS:
             choice = confirmations.decision(verb) if on_card else pending.payload["decision"]
             outcome = await self._decide_receipt(pending.payload["receipt"], choice, user_id, who)
+        elif status == "ok" and pending.kind == "announcement":
+            outcome = await self._send_announcement(pending.payload, user_id, who)
         elif status == "ok":
             outcome = self._execute(pending.kind, pending.payload, user_id)
         else:
@@ -439,6 +441,18 @@ class Bot:
         until = (done.get("data") or {}).get("cubierto_hasta")
         covered = f", cubierto hasta {_day_year(until)}" if until else ""
         return f"Aprobado por {who}: {months} {'mes' if months == 1 else 'meses'}{covered}."
+
+    async def _send_announcement(self, payload: dict[str, Any], user_id: int, who: str) -> str:
+        """Hand an announcement to the API, for the list fixed when it was proposed. The API sends it afterwards."""
+        if self._api is None:
+            return NO_LONGER_VALID
+        try:
+            done = await self._api.write("/assistant/messages", telegram_user_id=user_id, json=payload)
+        except ApiError as exc:
+            log.warning("sending an announcement failed: API status %s: %s", exc.status, exc.message)
+            return f"No se envió: {exc.message}"
+        left = f" {done['dropped']} ya no estaban activos y se quedaron fuera." if done.get("dropped") else ""
+        return f"{who} envió la solicitud al servidor: {done['recipients']} atleta(s).{left}"
 
     def _execute(self, kind: str, payload: dict[str, Any], user_id: int) -> str:
         """Run a confirmed action and say what happened. Every kind of action with an effect is listed here."""

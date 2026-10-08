@@ -39,6 +39,10 @@ class FakeApi:
             return self.workouts
         if path.endswith("/laps"):
             return self.laps
+        if path == "/assistant/garmin/errors":
+            return self.garmin
+        if path == "/assistant/messages":
+            return self.sent
         for tail in ("plan", "payments", "profile", "receipts"):
             if path.endswith("/" + tail):
                 return getattr(self, tail)
@@ -54,6 +58,8 @@ class FakeApi:
         self.calls.append((path, json, telegram_user_id))
         if self.fail:
             raise self.fail
+        if path.endswith("/preview"):
+            return self.preview
         if path.endswith("/aggregate"):
             return {"success": True, **self.figures, "matched": self.matched, "notes": self.notes}
         if path.endswith("/series"):
@@ -1030,6 +1036,154 @@ async def test_a_rejection_with_its_own_reason_is_only_proposed(tmp_path):
     _, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
     assert pending.payload == {"receipt": 6, "decision": {"accion": "rechazar", "motivo": reason}}
     assert (await box.run("rechazar_comprobante", {"comprobante": 6, "motivo": "no"}, 956)).is_error
+
+
+GARMIN = {
+    "success": True,
+    "period": {"from": "2026-10-01", "to": "2026-10-21"},
+    "total": 2,
+    "athletes": 2,
+    "truncated": False,
+    "reasons": [
+        {"error": "User level is not valid", "workouts": 1, "athletes": 1},
+        {"error": "Garmin 500: upstream", "workouts": 1, "athletes": 1},
+    ],
+    "workouts": [
+        {"id": 1, "date": "2026-10-08", "type": "Easy run", "attempts": 5, "gave_up": True,
+         "error": "User level is not valid", "athlete": {"id": 14, "name": "Beto Corredor"}},
+        {"id": 2, "date": "2026-10-09", "type": None, "attempts": 2, "gave_up": False,
+         "error": "Garmin 500: upstream", "athlete": {"id": 10, "name": "Ana Peña"}},
+    ],
+}
+SENT = {
+    "success": True,
+    "period": {"from": "2026-09-07", "to": "2026-10-07"},
+    "total": 1,
+    "truncated": False,
+    "messages": [
+        {"id": 7, "date": "2026-10-06", "channel": "push", "category": "General", "subject": "Felicidades Ana",
+         "recipients": 40, "delivery": {"accepted": 30, "rejected": 1, "failed": 2, "skipped": 0, "reached": 33, "no_destination": 7}},
+    ],
+}
+PREVIEW = {
+    "success": True,
+    "total": 2,
+    "reach": {"push": 1, "email": 2},
+    "not_active": 1,
+    "matched": {"events": [], "groups": ["42k MTY 3:45+"]},
+    "notes": [],
+    "categories": [{"id": 1, "name": "General"}, {"id": 2, "name": "Eventos"}],
+    "athletes": [
+        {"id": 10, "name": "Ana Peña", "group": "42k MTY 3:45+", "push": True, "email": True},
+        {"id": 14, "name": "Beto Corredor", "group": None, "push": False, "email": True},
+    ],
+}
+
+
+async def test_garmin_failures_show_names_in_the_chat_and_codes_and_reasons_to_the_model():
+    from duma.pseudonyms import Pseudonyms
+
+    api, names = FakeApi([]), Pseudonyms()
+    api.garmin = GARMIN
+    r = await Toolbox(api).run("errores_garmin", {"desde": "2026-10-01"}, 956, names)
+    assert api.calls[-1][:2] == ("/assistant/garmin/errors", {"from": "2026-10-01"})
+    assert [f.name for f in r.files] == ["errores_garmin.png"]
+    assert "2 entreno(s) de 2 atleta(s)" in r.to_model and "- 1 entreno(s) de 1 atleta(s): User level is not valid" in r.to_model
+    assert "ATLETA_01 | 2026-10-08 | Easy run | 5 | ya no se intenta" in r.to_model
+    assert "Beto" not in r.to_model and "Ana" not in r.to_model
+
+    r = await Toolbox(api).run("errores_garmin", {"formato": "csv"}, 956, names)
+    lines = r.files[0].content.decode("utf-8-sig").splitlines()
+    assert lines[:2] == ["Fecha,Atleta,Tipo,Intentos,Estado,Error", "2026-10-08,Beto Corredor,Easy run,5,ya no se intenta,User level is not valid"]
+
+    api.garmin = {**GARMIN, "total": 0, "athletes": 0, "workouts": [], "reasons": []}
+    r = await Toolbox(api).run("errores_garmin", {}, 956, names)
+    assert not r.files and r.to_model.startswith("Ningún entreno rechazado por Garmin")
+
+
+async def test_sent_announcements_keep_the_subject_in_the_chat():
+    api = FakeApi([])
+    api.sent = SENT
+    r = await Toolbox(api).run("avisos_enviados", {"formato": "csv"}, 956)
+    assert api.calls[-1][:2] == ("/assistant/messages", {})
+    lines = r.files[0].content.decode("utf-8-sig").splitlines()
+    assert lines[1] == "2026-10-06,push,General,Felicidades Ana,40,30,3,7,0"
+    assert "2026-10-06 | push | General | 40 | 30 | 3 | 7 | 0" in r.to_model and "Felicidades" not in r.to_model
+
+    api.sent = {**SENT, "total": 0, "messages": []}
+    assert (await Toolbox(api).run("avisos_enviados", {}, 956)).to_model.startswith("Ningún aviso enviado")
+
+
+async def test_an_announcement_is_proposed_with_its_audience_frozen_and_sends_nothing(tmp_path):
+    from duma.pseudonyms import Pseudonyms
+
+    api, names = FakeApi([]), Pseudonyms()
+    api.preview = PREVIEW
+    box, store = await box_with_buttons(api, tmp_path)
+    assert "proponer_aviso" in {s["name"] for s in box.schemas}
+    assert "proponer_aviso" not in {s["name"] for s in Toolbox(api).schemas}
+    code = names.code(14, "Beto Corredor")
+    args = {
+        "asunto": "Pista cerrada", "mensaje": "Mañana no hay pista.", "canal": "ambos",
+        "filtros": [{"tipo": "grupo", "nombre": "42k"}], "atletas": [code], "categoria": "eventos",
+    }
+    r = await box.run("proponer_aviso", args, 956, names)
+    assert api.calls[-1][:2] == (
+        "/assistant/messages/preview",
+        {"filters": [{"type": "group", "name": "42k"}], "athlete_ids": [14], "everyone": False},
+    )
+    assert r.direct_text.splitlines() == [
+        "Aviso por correo y push a 2 atleta(s) activo(s) · grupos 42k MTY 3:45+ · 1 nombrado(s) uno por uno",
+        "Push: 1 con la app en su teléfono; 1 no lo recibirán por ahí.",
+        "Correo: 2 con dirección.",
+        "1 de los nombrados no están activos y no lo reciben.",
+        "Para: Ana Peña, Beto Corredor.",
+        "Categoría: Eventos.",
+        "",
+        "Asunto: Pista cerrada",
+        "",
+        "Mañana no hay pista.",
+    ]
+    assert [label for label, _ in r.buttons] == ["Enviar", "Cancelar"]
+    assert "Ana" not in r.to_model and "Beto" not in r.to_model and "No está enviado" in r.to_model
+    status, pending = await store.claim(r.buttons[0][1].split(":")[1], 956)
+    assert (status, pending.kind) == ("ok", "announcement")
+    assert pending.payload == {
+        "user_ids": [10, 14], "subject": "Pista cerrada", "message": "Mañana no hay pista.", "channel": "both",
+        "category_id": 2,
+    }
+
+    api.preview = {**PREVIEW, "total": 12, "athletes": PREVIEW["athletes"] * 6}
+    r = await box.run("proponer_aviso", {**args, "canal": "push"}, 956, names)
+    assert [f.name for f in r.files] == ["destinatarios.csv"] and "Para:" not in r.direct_text
+    assert "Correo:" not in r.direct_text
+
+
+async def test_an_announcement_without_a_clear_audience_is_not_proposed(tmp_path):
+    from duma.pseudonyms import Pseudonyms
+
+    api, names = FakeApi([]), Pseudonyms()
+    api.preview = {**PREVIEW, "notes": ["No group matches 'berln'"], "athletes": [], "total": 0}
+    box, _ = await box_with_buttons(api, tmp_path)
+    base = {"asunto": "Pista cerrada", "mensaje": "Mañana no hay pista.", "canal": "push"}
+
+    for bad in (
+        base,  # nobody named
+        {**base, "todos": True, "filtros": [{"tipo": "grupo", "nombre": "42k"}]},
+        {**base, "todos": True, "canal": "sms"},
+        {**base, "todos": True, "asunto": "x" * 46},
+        {**base, "atletas": ["ATLETA_09"]},  # a code nobody was given
+    ):
+        assert (await box.run("proponer_aviso", bad, 956, names)).is_error
+    assert api.calls == []
+
+    r = await box.run("proponer_aviso", {**base, "filtros": [{"tipo": "grupo", "nombre": "berln"}]}, 956, names)
+    assert r.buttons is None and r.direct_text is None and "No group matches" in r.to_model
+
+    api.preview = {**PREVIEW, "athletes": [], "total": 0}
+    r = await box.run("proponer_aviso", {**base, "todos": True}, 956, names)
+    assert r.buttons is None and "no hay a quién" in r.to_model
+    assert api.calls[-1][1] == {"filters": [], "athlete_ids": [], "everyone": True}
 
 
 def test_no_tool_of_the_model_can_reach_a_route_that_writes():

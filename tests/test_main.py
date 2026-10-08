@@ -1105,3 +1105,55 @@ async def test_a_card_with_a_photo_and_buttons_sends_the_photo_first_and_the_tex
     await bot.handle(msg("el siguiente comprobante", message_thread_id=7, is_topic_message=True))
     assert tg.photos == [(ADMIN, "comprobante_6.jpg", b"\xff\xd8", "", 7)]
     assert tg.sent == [(ADMIN, "Comprobante #6", 7)] and tg.keyboards == [["rc:a1:abc"]]
+
+
+# ── Announcements: the click is what sends ────────────────────────────
+
+
+class SendingApi:
+    def __init__(self, answer=None, fail=None):
+        self.writes, self.answer, self.fail = [], answer, fail
+
+    async def write(self, path, *, telegram_user_id, json):
+        self.writes.append((path, telegram_user_id, json))
+        if self.fail:
+            raise self.fail
+        return self.answer
+
+
+ANNOUNCEMENT = {"user_ids": [10, 14], "subject": "Pista cerrada", "message": "Mañana no hay pista.", "channel": "both"}
+QUEUED = {"success": True, "queued": True, "recipients": 2, "dropped": 1, "channels": ["push", "email"]}
+
+
+async def test_enviar_hands_the_frozen_list_to_the_api_once_and_cancel_sends_nothing(settings, tmp_path):
+    api = SendingApi(QUEUED)
+    bot, tg, store, _ = await with_preferences(settings, tmp_path)
+    bot._api = api
+    action = await store.propose(10, "announcement", ANNOUNCEMENT, "Aviso por correo y push a 2 atleta(s)")
+
+    await bot.handle(click(f"ok:{action}", user=20))
+    assert api.writes == [] and tg.popups == [main_module.NOT_YOURS]
+
+    await bot.handle(named(click(f"ok:{action}")))
+    assert api.writes == [("/assistant/messages", 10, ANNOUNCEMENT)]
+    assert tg.edits == [(
+        900,
+        "Aviso por correo y push a 2 atleta(s)\n\nAdrián envió la solicitud al servidor: 2 atleta(s). 1 ya no estaban "
+        "activos y se quedaron fuera.",
+    )]
+    await bot.handle(click(f"ok:{action}"))
+    assert len(api.writes) == 1 and tg.popups[-1] == main_module.NO_LONGER_VALID
+
+    other = await store.propose(10, "announcement", ANNOUNCEMENT, "Aviso")
+    await bot.handle(click(f"no:{other}"))
+    assert len(api.writes) == 1 and tg.edits[-1] == (900, "Aviso\n\nCancelado.")
+
+
+async def test_a_send_the_api_refuses_says_why(settings, tmp_path):
+    from duma.api_client import ApiError
+
+    bot, tg, store, _ = await with_preferences(settings, tmp_path)
+    bot._api = SendingApi(fail=ApiError(403, "Tu Telegram no está ligado a un usuario de la consola"))
+    action = await store.propose(10, "announcement", ANNOUNCEMENT, "Aviso")
+    await bot.handle(click(f"ok:{action}"))
+    assert tg.edits[-1] == (900, "Aviso\n\nNo se envió: Tu Telegram no está ligado a un usuario de la consola")
