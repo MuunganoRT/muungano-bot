@@ -38,7 +38,8 @@ class FakeBox:
         self.result = result or ToolResult("RESUMEN EN EL CHAT", "Resumen enviado al chat: 2 de 3 entrenos.")
         self.ran = []
 
-    async def run(self, name, args, user, names=None):
+    async def run(self, name, args, user, names=None, said=None):
+        self.said = said
         self.names = names
         self.ran.append((name, args, user))
         return self.result
@@ -73,6 +74,8 @@ async def test_a_direct_tool_goes_to_the_chat_and_the_model_gets_the_acknowledge
 
     assert answer == "¿Algo más?" and said == ["RESUMEN EN EL CHAT"]
     assert box.ran == [("resumen_atleta", {"nombre": "ana"}, 956)]
+    # The tools are told what the admin wrote, to tell it from what the model filled in.
+    assert box.said.splitlines()[-1] == session.messages[0]["content"]
     second = llm.calls[1]["messages"]
     assert [m["role"] for m in second] == ["user", "assistant", "user"]
     assert second[2]["content"] == [{"type": "tool_result", "tool_use_id": "tu_1", "content": "Resumen enviado al chat: 2 de 3 entrenos."}]

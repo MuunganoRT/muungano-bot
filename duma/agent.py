@@ -125,6 +125,23 @@ def _text(content: list[Any]) -> str:
     return "".join(block.text for block in content if block.type == "text").strip()
 
 
+def _said(session: "Session") -> str:
+    """Everything the admin wrote in this conversation, and the notes that stand in for what was compacted.
+
+    The tools use it to tell what the admin asked for from what the model filled in by itself.
+    """
+    parts = [session.notes or ""]
+    for message in session.messages:
+        if message["role"] != "user":
+            continue
+        content = message["content"]
+        if isinstance(content, str):
+            parts.append(content)
+        else:
+            parts += [block["text"] for block in content if block.get("type") == "text"]
+    return "\n".join(parts)
+
+
 class Agent:
     def __init__(
         self,
@@ -284,7 +301,9 @@ class Agent:
                     for block in response.content:
                         if block.type != "tool_use":
                             continue
-                        result = await self._tools.run(block.name, dict(block.input), telegram_user_id, session.names)
+                        result = await self._tools.run(
+                            block.name, dict(block.input), telegram_user_id, session.names, said=_said(session)
+                        )
                         if self._audit:
                             self._audit.log("tool", user=telegram_user_id, tool=block.name, args=dict(block.input), error=result.is_error)
                         if result.files or result.buttons:

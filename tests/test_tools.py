@@ -567,6 +567,47 @@ async def test_an_event_name_that_fits_several_races_asks_which_with_a_button_fo
     assert not (await Toolbox(api).run("buscar_atletas", both, 956)).is_error
 
 
+async def test_a_group_name_that_fits_several_groups_asks_which():
+    api = FakeApi([ANA_P])
+    api.matched = {"groups": ["42k MTY 3:30+", "42k MTY 3:45+", "42k MTY 4:00+"]}
+    r = await Toolbox(api).run("buscar_atletas", {"filtros": [{"tipo": "grupo", "nombre": "42k MTY"}]}, 956)
+    assert r.direct_text == "Ese nombre coincide con varios grupos. ¿Cuál quieres?" and not r.files
+    assert [label for label, _ in r.buttons] == ["42k MTY 3:30+", "42k MTY 3:45+", "42k MTY 4:00+", "Todos"]
+
+    named = {"filtros": [{"tipo": "grupo", "nombre": "42k MTY 3:30+", "otros": ["42k MTY 3:45+", "42k MTY 4:00+"]}]}
+    assert (await Toolbox(api).run("buscar_atletas", named, 956)).buttons is None
+
+
+async def test_a_year_or_distance_the_admin_never_wrote_is_asked_about_instead_of_taken():
+    one, three = ["42k Berlin 2026 (2026-09-27)"], ["42k Berlin (2024-09-29)", "42k Berlin 2025 (2025-09-21)", "42k Berlin 2026 (2026-09-27)"]
+
+    class Api(FakeApi):
+        async def post(self, path, *, telegram_user_id, json):
+            # With only the admin's own word, "berlin" fits three races; narrowed by a year, one.
+            event = json["filters"][0]
+            self.matched = {"events": one if "year" in event or "2026" in event["name"] else three}
+            return await super().post(path, telegram_user_id=telegram_user_id, json=json)
+
+    guessed = {"filtros": [{"tipo": "evento", "nombre": "42k Berlin 2026", "anio": 2026}]}
+
+    api = Api([ANA_P])
+    r = await Toolbox(api).run("buscar_atletas", guessed, 956, said="tráeme los inscritos a Berlín")
+    assert r.direct_text == "Ese nombre coincide con varios eventos. ¿Cuál quieres?" and not r.files
+    assert [label for label, _ in r.buttons] == ["42k Berlin · 29 sep 2024", "42k Berlin 2025 · 21 sep 2025", "42k Berlin 2026 · 27 sep 2026", "Todos"]
+    probe = api.calls[-1][1]
+    assert probe["count_only"] is True and probe["filters"] == [{"type": "event", "name": "berlin", "status": "registered"}]
+
+    # The admin wrote the year: the distance the model added does not make it a doubt, since it still fits one race.
+    api = Api([ANA_P])
+    assert (await Toolbox(api).run("buscar_atletas", guessed, 956, said="los de berlin 2026")).buttons is None
+    assert api.calls[-1][1]["filters"] == [{"type": "event", "name": "berlin 2026", "status": "registered", "year": 2026}]
+
+    # Picked from the buttons, every word is the admin's: no second query at all.
+    api = Api([ANA_P])
+    picked = await Toolbox(api).run("buscar_atletas", guessed, 956, said="los de berlin\n42k Berlin 2026 · 27 sep 2026")
+    assert picked.buttons is None and len(api.calls) == 1
+
+
 async def test_a_name_is_looked_up_among_those_a_filter_matches_and_comes_back_as_a_code():
     from duma.pseudonyms import Pseudonyms
 
