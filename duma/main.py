@@ -8,7 +8,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from duma.agent import Agent, AnthropicLLM, Session
 from duma.api_client import ApiError, MuunganoApi
@@ -22,7 +22,7 @@ from duma.confirmations import Confirmations
 from duma.preferences import Preferences
 from duma.render import _day_year
 from duma.sessions import SessionStore
-from duma.telegram_api import Telegram, TelegramError
+from duma.telegram_api import MAX_CAPTION, Telegram, TelegramError
 from duma.tools import OutFile, Toolbox, application_card, parse_choice
 from duma.usage import PRICES, Usage, cost_usd
 
@@ -34,14 +34,19 @@ PROMPT = ROOT / "prompts" / "system.md"
 HELP = (
     "Soy Duma, el cheetah de datos de Muungano RT. Te traigo el resumen de un atleta, busco personas por nombre, "
     "listo a quienes cumplen un filtro (evento, pago, grupo, entrenos) y te doy cifras del equipo.\n"
-    "En General, pregúntame con /ruun: abro un tema para esa pregunta y ahí seguimos platicando normal, sin comando.\n"
+    "En General, toca /ruun: abro un tema y ahí me escribes normal, sin comando. También puedes poner la pregunta "
+    "junto al comando.\n"
     "/ruun <pregunta>: pregunta nueva · /clear: sesión limpia · /usage: costo y contexto · "
     "/prefs: reglas permanentes · /forget <n>: quitar una · /help: esto"
 )
 RUN = "ruun"
+# What a hurried thumb types instead.
+RUN_ALIASES = (RUN, "run", "runn", "duma")
+READY = "Sí, dime."
+NEW_TOPIC = "Nueva pregunta"
 # What Telegram offers when an admin types `/`. Registered at startup, for the admin group only.
 COMMANDS = [
-    (RUN, "Pregunta nueva: /ruun ¿cuántos inactivos hay?"),
+    (RUN, "Pregunta nueva: abre un tema y te leo ahí"),
     ("usage", "Costo y contexto de este tema"),
     ("clear", "Sesión limpia en este tema"),
     ("prefs", "Reglas permanentes guardadas"),
@@ -71,7 +76,6 @@ HOOK_CALLER = 0
 RECEIPT_KINDS = ("receipt", "receipt_reject")
 NO_LONGER_VALID = "Esto ya se decidió o ya no está vigente."
 EXPIRED = "Caducó sin decidirse. Pídemelo otra vez."
-RUN_NEEDS_TEXT = "Escribe la pregunta después del comando. Por ejemplo: /ruun ¿cuántos inactivos hay?"
 # A chat among admins in General must not get the reminder on every line.
 HINT_EVERY_S = 600
 COMPACTING = "Compactando sesión…"
@@ -221,6 +225,13 @@ class Bot:
         self._wall_clock = wall_clock
         self._topics_retry_at = 0.0
         self._hinted_at: dict[int, float] = {}
+        # Topics opened by a bare `/ruun`: they take their name from the first thing asked in them. On disk, so a
+        # deploy between the tap and the question does not leave one called "Nueva pregunta" for good.
+        self._untitled_file = settings.state_dir / "untitled.topics"
+        try:
+            self._untitled: set[int] = {int(line) for line in self._untitled_file.read_text().split()}
+        except (OSError, ValueError):
+            self._untitled = set()
         # One session per (admin, topic); topic 0 is General when topics cannot be opened.
         self._sessions: dict[tuple[int, int], Session] = {}
 
@@ -635,12 +646,19 @@ class Bot:
         log.warning("a confirmed action of an unknown kind was not run: %s", kind)
         return NO_LONGER_VALID
 
+    def _remember_untitled(self) -> None:
+        try:
+            self._untitled_file.parent.mkdir(parents=True, exist_ok=True)
+            self._untitled_file.write_text("\n".join(str(t) for t in sorted(self._untitled)))
+        except OSError as exc:
+            log.warning("could not save the untitled topics: %s", type(exc).__name__)
+
     def _lobby_open(self) -> bool:
         """Whether General should open a topic per request right now."""
         return self._clock() >= self._topics_retry_at
 
     async def _open_topic(self, chat_id: int, message: dict[str, Any], text: str) -> Optional[int]:
-        title = topic_title(text)
+        title = topic_title(text) if text else NEW_TOPIC
         try:
             thread_id = await self._tg.create_forum_topic(chat_id, title)
         except TelegramError as exc:
@@ -649,13 +667,19 @@ class Bot:
             return None
         # The id is what a topic can be deleted by later; the title is request text, so it stays out of the log.
         log.info("opened topic %s (%s)", thread_id, topic_link(chat_id, thread_id))
+        if not text:
+            self._untitled.add(thread_id)
+            self._remember_untitled()
+            await self._tg.send_message(chat_id, f"Te leo aquí: {topic_link(chat_id, thread_id)}", silent=True)
+            return thread_id
         # The request itself, so the topic reads on its own.
         if message.get("message_id"):
             try:
-                await self._tg.forward_message(chat_id, chat_id, message["message_id"], thread_id)
+                await self._tg.forward_message(chat_id, chat_id, message["message_id"], thread_id, silent=True)
             except TelegramError as exc:
                 log.info("could not copy the request into its topic: %s", exc)
-        await self._tg.send_message(chat_id, f"Lo contesto en «{title}»: {topic_link(chat_id, thread_id)}")
+        # Housekeeping around the answer: the answer is the one message of the turn that rings.
+        await self._tg.send_message(chat_id, f"Lo contesto en «{title}»: {topic_link(chat_id, thread_id)}", silent=True)
         return thread_id
 
     @staticmethod
@@ -690,10 +714,13 @@ class Bot:
 
         lobby = thread_id is None and self._lobby_open()
         command = _command(text)
-        if command == RUN:
+        if command in RUN_ALIASES:
             question = _arguments(text)
             if not question and attachment is None:
-                await self._tg.send_message(chat_id, RUN_NEEDS_TEXT, thread_id)
+                # Tapping the command in Telegram's menu sends it bare: that is a way in, not a mistake.
+                if lobby:
+                    thread_id = await self._open_topic(chat_id, message, "")
+                await self._tg.send_message(chat_id, READY, thread_id, silent=True)
                 return
             if await self._over_budget(chat_id, thread_id):
                 return
@@ -714,6 +741,13 @@ class Bot:
             return
         if await self._over_budget(chat_id, thread_id):
             return
+        if thread_id in self._untitled and text:
+            self._untitled.discard(thread_id)
+            self._remember_untitled()
+            try:
+                await self._tg.edit_forum_topic(chat_id, thread_id, topic_title(text))
+            except TelegramError as exc:
+                log.info("could not name topic %s: %s", thread_id, exc)
         await self._ask(chat_id, user_id, thread_id, text, attachment)
 
     async def _listen(self, attachment: media.Attachment, data: bytes) -> str:
@@ -748,26 +782,18 @@ class Bot:
         text: str,
         attachment: Optional[media.Attachment] = None,
     ) -> None:
-        async def say(
+        # What the tools and the model produce during the turn. It goes out once, at the end, as few messages as
+        # hold it, and only the last one makes the admins' phones ring.
+        outbox: list[tuple[str, list[OutFile], Optional[list[tuple[str, str]]]]] = []
+
+        async def collect(
             reply: str, files: Optional[list[OutFile]] = None, buttons: Optional[list[tuple[str, str]]] = None
         ) -> None:
-            # Buttons only hang from a text message, and that message is the one rewritten once they are
-            # pressed: with buttons the files go first, bare, and the text follows with the keyboard.
-            caption = "" if buttons else reply
-            photos = [f for f in files or [] if f.photo]
-            if len(photos) > 1:
-                await self._tg.send_photos(chat_id, [(f.name, f.content) for f in photos], caption, thread_id)
-                caption = ""
-            elif photos:
-                only = photos[0]
-                await self._tg.send_photo(chat_id, only.name, only.content, caption, thread_id, only.mime)
-                caption = ""
-            for file in files or []:
-                if not file.photo:
-                    await self._tg.send_document(chat_id, file.name, file.content, caption, thread_id)
-                    caption = ""
-            if not files or buttons:
-                await self._tg.send_message(chat_id, reply, thread_id, _keyboard(buttons))
+            outbox.append((reply, list(files or []), buttons))
+            await self._tg.send_chat_action(chat_id, thread_id)
+
+        async def say(reply: str, silent: bool = False) -> None:
+            await self._tg.send_message(chat_id, reply, thread_id, silent=silent)
 
         content: Any = text
         if attachment is not None:
@@ -776,7 +802,7 @@ class Bot:
                 if attachment.kind == "voice":
                     heard = await self._listen(attachment, data)
                     # The admin sees what was understood before the answer: a misheard name or number shows here.
-                    await say(media.HEARD.format(text=heard))
+                    await say(media.HEARD.format(text=heard), silent=True)
                     content = text = f"{text}\n\n{heard}".strip()
                 else:
                     content = [media.to_block(attachment, data), {"type": "text", "text": text or media.DEFAULT_QUESTION}]
@@ -792,27 +818,76 @@ class Bot:
         async with session.lock:
             before = cost_usd(self._s.model, session.usage) or 0.0
             if session.context_tokens > self._s.session_max_tokens:
-                await say(COMPACTING)
+                await say(COMPACTING, silent=True)
                 if not await self._agent.compact(session):
                     session.reset()
-                    await say(FRESH_SESSION)
+                    await say(FRESH_SESSION, silent=True)
             await self._tg.send_chat_action(chat_id, thread_id)
             # What kind of file and how big, never its name or what it says.
             sent = {"file": attachment.kind, "bytes": attachment.size} if attachment else {}
             if attachment and attachment.kind == "voice":
                 sent["seconds"] = attachment.seconds
             self._audit.log("message", user=user_id, chars=len(text), topic=thread_id or 0, **sent)
-            answer = await self._agent.run(session, content, user_id, say)
+            answer = await self._agent.run(session, content, user_id, collect)
             reached = False
             if self._budget is not None:
                 self._budget.add((cost_usd(self._s.model, session.usage) or 0.0) - before)
                 reached = self._budget.exhausted()
             await self._save(user_id, thread_id or 0)
         if answer:
-            await say(answer)
+            outbox.append((answer, [], None))
         if reached:
             log.warning("the daily budget of $%.2f was reached", self._budget.limit_usd)
-            await say(BUDGET_REACHED.format(limit=self._budget.limit_usd))
+            outbox.append((BUDGET_REACHED.format(limit=self._budget.limit_usd), [], None))
+        await self._flush(chat_id, thread_id, outbox)
+
+    async def _flush(
+        self,
+        chat_id: int,
+        thread_id: Optional[int],
+        outbox: list[tuple[str, list[OutFile], Optional[list[tuple[str, str]]]]],
+    ) -> None:
+        """One turn's output: the pictures as one album, the files, the text, then each card with buttons."""
+        plain = [(text, files) for text, files, buttons in outbox if not buttons]
+        photos = [f for _, files in plain for f in files if f.photo]
+        documents = [f for _, files in plain for f in files if not f.photo]
+        text = "\n\n".join(t for t, _ in plain if t)
+        # Short enough, the text rides under the last picture or file instead of being a message of its own.
+        caption = text if (photos or documents) and len(text) <= MAX_CAPTION else ""
+
+        sends: list[Callable[[bool], Awaitable[None]]] = []
+
+        def album(pictures: list[OutFile], under: str) -> Callable[[bool], Awaitable[None]]:
+            if len(pictures) == 1:
+                only = pictures[0]
+                return lambda silent: self._tg.send_photo(chat_id, only.name, only.content, under, thread_id, only.mime, silent=silent)
+            return lambda silent: self._tg.send_photos(chat_id, [(f.name, f.content) for f in pictures], under, thread_id, silent=silent)
+
+        def document(file: OutFile, under: str) -> Callable[[bool], Awaitable[None]]:
+            return lambda silent: self._tg.send_document(chat_id, file.name, file.content, under, thread_id, silent=silent)
+
+        def message(body: str, buttons: Optional[list[tuple[str, str]]] = None) -> Callable[[bool], Awaitable[None]]:
+            return lambda silent: self._tg.send_message(chat_id, body, thread_id, _keyboard(buttons), silent=silent)
+
+        if photos:
+            sends.append(album(photos, "" if documents else caption))
+        for n, file in enumerate(documents, 1):
+            sends.append(document(file, caption if n == len(documents) else ""))
+        if text and not caption:
+            sends.append(message(text))
+        for body, files, buttons in outbox:
+            if not buttons:
+                continue
+            # Buttons only hang from a text message, and that message is the one rewritten once they are
+            # pressed: the card's own files go first, bare, and its text follows with the keyboard.
+            pictures = [f for f in files if f.photo]
+            if pictures:
+                sends.append(album(pictures, ""))
+            sends.extend(document(f, "") for f in files if not f.photo)
+            sends.append(message(body, buttons))
+
+        for n, send in enumerate(sends, 1):
+            await send(n < len(sends))
 
     async def _run_command(
         self, command: str, chat_id: int, user_id: int, thread_id: Optional[int], lobby: bool, arguments: str = ""

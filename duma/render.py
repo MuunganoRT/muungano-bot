@@ -47,11 +47,16 @@ def render_summary(data: dict[str, Any]) -> str:
     lines = [title, _period(period["from"], period["to"])]
 
     prescribed, done = workouts["prescribed"], workouts["done"]
+    # Prescribed for today or later and not run yet: neither done nor missed.
+    pending = workouts.get("pending") or 0
+    waiting = f"{pending} por hacer" if pending else ""
     if not prescribed:
-        lines.append("Sin entrenos prescritos en ese periodo.")
+        lines.append(f"Todavía sin entrenos que contar: {waiting}." if waiting else "Sin entrenos prescritos en ese periodo.")
         return "\n".join(lines)
 
     entry = f"Entrenos: {done}/{prescribed} ({round(100 * done / prescribed)}%)"
+    if waiting:
+        entry += f" · {waiting}"
     if data.get("score_avg") is not None:
         entry += f" · score {_num(data['score_avg'])}%"
     lines.append(entry)

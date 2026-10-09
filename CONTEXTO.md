@@ -25,7 +25,9 @@ aprobar o rechazar comprobantes, decidir solicitudes de ingreso y mandar avisos 
 ## Quién puede hablarle y dónde
 
 - Solo en el grupo `TELEGRAM_ADMIN_CHAT_ID` y solo los ids de `TELEGRAM_ALLOWED_USER_IDS` (`duma/auth.py`).
-- En **General** hay que usar `/ruun <pregunta>`: abre un tema nuevo y contesta ahí. Un mensaje suelto en General
+- En **General** se abre un tema con `/ruun`: solo, abre el tema «Nueva pregunta», contesta «Sí, dime» y el tema
+  toma su nombre de lo primero que se pregunte ahí (los que esperan nombre se guardan en `state/untitled.topics`); con la pregunta junto (`/ruun <pregunta>`), abre el tema y
+  contesta. `/run`, `/runn` y `/duma` hacen lo mismo (`RUN_ALIASES`, `duma/main.py`). Un mensaje suelto en General
   recibe un recordatorio.
 - En **cualquier otro tema**, también uno creado a mano, contesta sin comando. Cada tema es una sesión aparte.
 - Entra texto, imágenes, PDF, CSV o texto, y notas de voz (transcritas en el servidor, `duma/voice.py`).
@@ -37,8 +39,8 @@ Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/
 
 | Herramienta | Contesta |
 |---|---|
-| `buscar_atleta` | quién es, por nombre; pregunta si hay homónimos |
-| `resumen_atleta` | hechos contra prescritos, score, km, ritmo y la tirada más larga de un periodo o ciclo |
+| `buscar_atleta` | quién es, por nombre; pregunta si hay homónimos. Con filtros busca el nombre solo entre quienes los cumplen («Ari, la de Berlin») y le devuelve al modelo el código, sin mandar nada al chat |
+| `resumen_atleta` | hechos contra prescritos, score, km, ritmo y la tirada más larga de un periodo o ciclo. Lo prescrito para hoy o después que aún no se hace sale como «por hacer» y no cuenta en el score |
 | `entrenos_atleta`, `vueltas_entreno` | cada entreno hecho y el desglose por vuelta de uno |
 | `plan_atleta` | qué le toca y qué no hizo, día por día; admite fechas futuras |
 | `pagos_atleta` | hasta cuándo está cubierto y sus comprobantes |
@@ -47,7 +49,7 @@ Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/
 | `solicitudes` | quién pidió entrar y nadie ha aceptado: pendientes, en lista de espera o rechazadas |
 | `errores_garmin` | entrenos que Garmin rechazó y no llegaron al reloj, con el motivo y si se sigue reintentando |
 | `avisos_enviados` | avisos mandados por correo o push, con cuántos aceptó cada canal |
-| `buscar_atletas` | lista de quienes cumplen unos filtros |
+| `buscar_atletas` | lista de quienes cumplen unos filtros. Con solo un filtro de evento, la imagen «Registro a <carrera>»: atleta, grupo, tiempo objetivo, resultado y diferencia |
 | `cifras` | totales de un conjunto: personas, pagos, entrenos, km, score |
 | `consultar` | una fila por persona para comparar o razonar (tope de 60); con filtro de evento, el tiempo objetivo que capturó al inscribirse, su resultado y la diferencia |
 | `grafica` | por semana, ranking o dispersión del score, como imagen |
@@ -133,6 +135,10 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 ## Cómo salen las respuestas
 
 - Texto plano: Telegram no interpreta Markdown aquí.
+- **Una respuesta por pregunta.** Lo que las herramientas y el modelo producen en un turno se junta y sale al final
+  (`Bot._flush`, `duma/main.py`): las imágenes como un álbum, los archivos, y el texto al pie del último si cabe o
+  como mensaje aparte; las tarjetas con botones van después, cada una en su mensaje. Solo el último mensaje del
+  turno notifica; los demás salen en silencio, igual que «Entendí: …» de una nota de voz y «Compactando sesión…».
 - Tablas (entrenos, vueltas, plan, pagos, comprobantes, solicitudes, errores de Garmin, avisos enviados): imagen hasta 40 filas, CSV si son más, o un álbum de
   imágenes repartidas parejo si el admin pide imagen (`Toolbox._deliver` y `_tables`, `duma/tools.py`).
 - Gráficas como imagen (`duma/charts.py`).
@@ -157,4 +163,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (296 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (302 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.

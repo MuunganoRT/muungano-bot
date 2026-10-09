@@ -26,7 +26,7 @@ import math
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional
 from zoneinfo import ZoneInfo
 
 from duma import charts, confirmations
@@ -126,12 +126,15 @@ SCHEMAS: list[dict[str, Any]] = [
         "name": "buscar_atleta",
         "description": (
             "Busca personas del equipo por nombre (atletas, coaches y admins) y muestra la lista en el chat. Úsala "
-            "cuando el administrador quiera saber quién es alguien o cuántos se llaman así, sin pedir su resumen."
+            "cuando el administrador quiera saber quién es alguien o cuántos se llaman así, sin pedir su resumen. "
+            "Con `filtros` busca el nombre solo entre quienes los cumplen (\"Ari, la de Berlin\"): si son pocos te "
+            "devuelve sus códigos a ti, sin mandar nada al chat."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "texto": {"type": "string", "description": "Parte del nombre o apellido, mínimo 2 letras."},
+                "filtros": FILTERS_SCHEMA,
                 "estado": {
                     "type": "string",
                     "enum": ["todos", "activos", "inactivos"],
@@ -916,6 +919,8 @@ def _row(code: str, person: dict[str, Any], summary: Optional[dict[str, Any]]) -
     if summary is not None:
         workouts = summary["workouts"]
         parts.append(f"entrenos {workouts['done']}/{workouts['prescribed']}")
+        if workouts.get("pending"):
+            parts.append(f"{workouts['pending']} por hacer (no cuentan todavía)")
         for label, key, unit in (("score", "score_avg", "%"), ("km", "distance_km", ""), ("ritmo", "avg_pace", " min/km"), ("FC", "avg_heart_rate", " lpm")):
             if summary.get(key) is not None:
                 parts.append(f"{label} {summary[key]}{unit}")
@@ -962,6 +967,12 @@ WORKOUT_COLUMNS = [
     ("Fecha", 1.1, "left"), ("Tipo", 2.0, "left"), ("Km", 1.0, "right"), ("Tiempo", 1.3, "right"),
     ("Ritmo", 1.0, "right"), ("FC", 0.8, "right"), ("Score", 1.0, "right"),
 ]
+ROSTER_COLUMNS = [
+    ("Atleta", 3.0, "left"), ("Grupo", 2.2, "left"), ("Objetivo", 1.5, "right"),
+    ("Resultado", 1.6, "right"), ("Diferencia", 1.2, "right"),
+]
+# What fits in those two columns before running into the next one.
+ROSTER_NAME_MAX, ROSTER_GROUP_MAX = 22, 18
 LAP_COLUMNS = [
     ("Vuelta", 0.7, "left"), ("Distancia", 1.4, "right"), ("Tiempo", 1.5, "right"),
     ("Ritmo", 1.3, "right"), ("FC", 1.2, "right"), ("Score", 1.2, "right"),
@@ -1325,7 +1336,7 @@ class Toolbox:
     ) -> ToolResult:
         names = names if names is not None else Pseudonyms()
         handlers = {
-            "buscar_atleta": self._search,
+            "buscar_atleta": lambda a, u: self._search(a, u, names),
             "resumen_atleta": self._summary,
             "buscar_atletas": self._query,
             "cifras": self._aggregate,
@@ -1374,12 +1385,33 @@ class Toolbox:
             params={"q": text, "member_status": member_status},
         )
 
-    async def _search(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+    async def _search(self, args: dict[str, Any], telegram_user_id: int, names: Pseudonyms) -> ToolResult:
+        if args.get("filtros"):
+            return await self._search_within(args, telegram_user_id, names)
         found = await self._find(_text(args, "texto"), _member_status(args), telegram_user_id)
         athletes, total = found["athletes"], found["total"]
         return ToolResult(
             render_candidates(athletes, total, question=False),
             f"{total} resultado(s); ya los mostré en el chat.",
+        )
+
+    async def _search_within(self, args: dict[str, Any], telegram_user_id: int, names: Pseudonyms) -> ToolResult:
+        """A name among those a filter matches: "Ari, la de Berlin". A few hits go to the model as codes, not to the chat."""
+        wanted = _fold(_text(args, "texto"))
+        body = {"filters": _filters(args), "member_status": _member_status(args), "limit": QUERY_LIMIT}
+        found = await self._api.post("/assistant/athletes/query", telegram_user_id=telegram_user_id, json=body)
+        hits = [a for a in found["athletes"] if wanted in _fold(a["name"])]
+        if not hits:
+            return ToolResult(None, f"Nadie con ese nombre entre las {found['total']} persona(s) de esos filtros.{_understood(found)}")
+        if len(hits) > MAX_CHOICES:
+            return ToolResult(
+                render_candidates(hits, len(hits), question=False),
+                f"{len(hits)} resultado(s); ya los mostré en el chat.{_understood(found)}",
+            )
+        codes = "; ".join(f"{names.code(a['id'], a['name'])} (grupo {(a.get('group') or 'ninguno').strip()})" for a in hits)
+        return ToolResult(
+            None,
+            f"{len(hits)} coincidencia(s): {codes}. Usa el código como `nombre` en las demás herramientas.{_understood(found)}",
         )
 
     async def _query(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
@@ -1394,6 +1426,10 @@ class Toolbox:
         total = found["total"]
         if count_only:
             return ToolResult(None, f"{total} persona(s) cumplen los filtros.{_understood(found)}")
+        # Asked by event alone, the list is that race's entrants. With more filters it is about something else too.
+        roster = self._roster(found) if all(f.get("type") == "event" for f in body["filters"]) else None
+        if roster:
+            return await roster
         if total <= QUERY_ROWS:
             return ToolResult(render_matches(found), f"{total} resultado(s); ya los mostré en el chat.{_understood(found)}")
 
@@ -1407,6 +1443,42 @@ class Toolbox:
             caption,
             f"{total} resultado(s); mandé la lista al chat como archivo CSV.{left}{_understood(found)}",
             files=[OutFile("atletas.csv", matches_csv(found))],
+        )
+
+    def _roster(self, found: dict[str, Any]) -> Optional[Awaitable[ToolResult]]:
+        """The entrants of one race as a single titled picture. None when the list is about something else."""
+        athletes = found["athletes"]
+        entries = [a.get("events") or [] for a in athletes]
+        if not athletes or found["total"] != len(athletes) or len(athletes) > charts.TABLE_MAX_ROWS:
+            return None
+        if any(len(e) != 1 for e in entries) or len({(e[0]["event"], e[0]["date"]) for e in entries}) != 1:
+            return None
+        event = entries[0][0]
+        rows, with_goal, with_result = [], 0, 0
+        for athlete, (entry,) in zip(athletes, entries):
+            goal, result = _goal_seconds(entry.get("goal")), entry.get("time_result")
+            with_goal += bool(goal)
+            with_result += bool(result)
+            rows.append([
+                _clip(athlete["name"], ROSTER_NAME_MAX),
+                _clip((athlete.get("group") or "").strip(), ROSTER_GROUP_MAX) or charts.EMPTY_CELL,
+                _race_time(goal) if goal else "sin capturar",
+                _race_time(result) if result else "sin resultado",
+                _gap(goal, result) if goal and result else charts.EMPTY_CELL,
+            ])
+        total = len(athletes)
+        to_model = (
+            f"{total} inscrito(s) a {event['event']} ({event['date']}): {with_goal} con objetivo capturado, "
+            f"{with_result} con resultado.{_understood(found)}"
+        )
+        return self._tables(
+            "registro",
+            "Evento",
+            f"Registro a {event['event']}",
+            f"{_day_year(event['date'])}  ·  {total} inscritos",
+            ROSTER_COLUMNS,
+            rows,
+            to_model,
         )
 
     async def _propose_preference(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:

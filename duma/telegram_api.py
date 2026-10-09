@@ -95,10 +95,13 @@ class Telegram:
         text: str,
         thread_id: Optional[int] = None,
         reply_markup: Optional[dict[str, Any]] = None,
+        silent: bool = False,
     ) -> None:
         pieces = split_message(text)
         for i, piece in enumerate(pieces):
             params: dict[str, Any] = {"chat_id": chat_id, "text": piece, "disable_web_page_preview": True}
+            if silent:
+                params["disable_notification"] = True
             if thread_id:
                 params["message_thread_id"] = thread_id
             if reply_markup and i == len(pieces) - 1:
@@ -112,11 +115,14 @@ class Telegram:
         content: bytes,
         caption: str = "",
         thread_id: Optional[int] = None,
+        silent: bool = False,
     ) -> None:
         if len(caption) > MAX_CAPTION:
-            await self.send_message(chat_id, caption, thread_id)
+            await self.send_message(chat_id, caption, thread_id, silent=silent)
             caption = ""
         params: dict[str, Any] = {"chat_id": chat_id}
+        if silent:
+            params["disable_notification"] = True
         if caption:
             params["caption"] = caption
         if thread_id:
@@ -131,9 +137,12 @@ class Telegram:
         caption: str = "",
         thread_id: Optional[int] = None,
         mime: str = "image/png",
+        silent: bool = False,
     ) -> None:
         """A picture shown in the chat itself. Telegram recompresses it; `send_document` keeps the original."""
         params: dict[str, Any] = {"chat_id": chat_id}
+        if silent:
+            params["disable_notification"] = True
         if caption:
             params["caption"] = caption[:MAX_CAPTION]
         if thread_id:
@@ -146,17 +155,20 @@ class Telegram:
         photos: list[tuple[str, bytes]],
         caption: str = "",
         thread_id: Optional[int] = None,
+        silent: bool = False,
     ) -> None:
         """Several pictures as one album, in order. More than an album holds go as consecutive albums."""
         for start in range(0, len(photos), MAX_ALBUM):
             batch = photos[start : start + MAX_ALBUM]
             if len(batch) == 1:  # an album needs two
-                await self.send_photo(chat_id, batch[0][0], batch[0][1], caption if start == 0 else "", thread_id)
+                await self.send_photo(chat_id, batch[0][0], batch[0][1], caption if start == 0 else "", thread_id, silent=silent)
                 continue
             media: list[dict[str, Any]] = [{"type": "photo", "media": f"attach://photo{i}"} for i in range(len(batch))]
             if caption and start == 0:
                 media[0]["caption"] = caption[:MAX_CAPTION]
             params: dict[str, Any] = {"chat_id": chat_id, "media": json.dumps(media)}
+            if silent:
+                params["disable_notification"] = True
             if thread_id:
                 params["message_thread_id"] = thread_id
             files = {f"photo{i}": (name, content, "image/png") for i, (name, content) in enumerate(batch)}
@@ -193,11 +205,18 @@ class Telegram:
         topic = await self._call("createForumTopic", {"chat_id": chat_id, "name": name[:128]})
         return int(topic["message_thread_id"])
 
+    async def edit_forum_topic(self, chat_id: int, thread_id: int, name: str) -> None:
+        await self._call("editForumTopic", {"chat_id": chat_id, "message_thread_id": thread_id, "name": name[:128]})
+
     async def close_forum_topic(self, chat_id: int, thread_id: int) -> None:
         await self._call("closeForumTopic", {"chat_id": chat_id, "message_thread_id": thread_id})
 
-    async def forward_message(self, chat_id: int, from_chat_id: int, message_id: int, thread_id: Optional[int] = None) -> None:
+    async def forward_message(
+        self, chat_id: int, from_chat_id: int, message_id: int, thread_id: Optional[int] = None, silent: bool = False
+    ) -> None:
         params: dict[str, Any] = {"chat_id": chat_id, "from_chat_id": from_chat_id, "message_id": message_id}
+        if silent:
+            params["disable_notification"] = True
         if thread_id:
             params["message_thread_id"] = thread_id
         await self._call("forwardMessage", params)

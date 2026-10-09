@@ -44,6 +44,22 @@ async def test_send_message_sends_each_piece_in_the_topic():
     assert len(sent) == 2 and all(p["message_thread_id"] == 7 and p["chat_id"] == -1 for p in sent)
 
 
+async def test_a_silent_send_does_not_ring_and_a_topic_can_be_renamed():
+    sent = []
+
+    def handler(request):
+        sent.append((request.url.path.rsplit("/", 1)[-1], json.loads(request.content)))
+        return httpx.Response(200, json={"ok": True, "result": {}})
+
+    tg = make(handler)
+    await tg.send_message(-100, "hola", 7, silent=True)
+    await tg.send_message(-100, "hola", 7)
+    await tg.forward_message(-100, -100, 3, 7, silent=True)
+    await tg.edit_forum_topic(-100, 7, "¿cuántos inactivos hay?")
+    assert [body.get("disable_notification") for _, body in sent[:3]] == [True, None, True]
+    assert sent[3] == ("editForumTopic", {"chat_id": -100, "message_thread_id": 7, "name": "¿cuántos inactivos hay?"})
+
+
 async def test_get_updates_asks_for_the_right_kinds_and_outlasts_the_poll():
     seen = {}
 

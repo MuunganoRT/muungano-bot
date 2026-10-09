@@ -515,6 +515,50 @@ async def test_an_event_row_tells_the_model_the_goal_the_result_and_what_nobody_
     assert "ganarle" not in r.to_model
 
 
+async def test_the_entrants_of_one_race_go_out_as_a_single_titled_picture(monkeypatch):
+    from duma import charts
+
+    drawn = {}
+
+    def fake_png(label, title, subtitle, columns, rows):
+        drawn.update(title=title, subtitle=subtitle, heads=[c[0] for c in columns], rows=rows)
+        return b"png"
+
+    monkeypatch.setattr(charts, "table_png", fake_png)
+
+    def entered(goal, result):
+        return [{"event": "21k San Diego", "date": "2026-05-31", "time_result": result, "goal": goal}]
+
+    people = [
+        {**ANA_P, "role": "runner", "events": entered("01:35:00", 5451)},
+        {**ANA_R, "role": "runner", "events": entered(None, None)},
+    ]
+    r = await Toolbox(FakeApi(people)).run("buscar_atletas", {"filtros": [{"tipo": "evento", "nombre": "san diego"}]}, 956)
+    assert [f.name for f in r.files] == ["registro.png"] and r.files[0].photo and r.direct_text == ""
+    assert drawn["title"] == "Registro a 21k San Diego" and drawn["subtitle"] == "31 may 2026  ·  2 inscritos"
+    assert drawn["heads"] == ["Atleta", "Grupo", "Objetivo", "Resultado", "Diferencia"]
+    assert drawn["rows"] == [
+        ["Ana Peña", "Maratón", "1:35:00", "1:30:51", "-0:04:09"],
+        ["Ana Ruiz", "Fondo 10K", "sin capturar", "sin resultado", charts.EMPTY_CELL],
+    ]
+    assert r.to_model.startswith("2 inscrito(s) a 21k San Diego (2026-05-31): 1 con objetivo capturado, 1 con resultado.")
+    assert "Ana" not in r.to_model
+
+
+async def test_a_name_is_looked_up_among_those_a_filter_matches_and_comes_back_as_a_code():
+    from duma.pseudonyms import Pseudonyms
+
+    api, names = FakeApi([ANA_P, ANA_R, {"id": 12, "name": "Luis Coach", "group": None}]), Pseudonyms()
+    args = {"texto": "ruiz", "filtros": [{"tipo": "evento", "nombre": "berlin"}]}
+    r = await Toolbox(api).run("buscar_atleta", args, 956, names)
+    assert r.direct_text is None and not r.files
+    assert r.to_model.startswith("1 coincidencia(s): ATLETA_01 (grupo Fondo 10K).")
+    assert names.athlete_id("ATLETA_01") == 11 and api.calls[-1][0].endswith("/assistant/athletes/query")
+
+    nobody = await Toolbox(api).run("buscar_atleta", {**args, "texto": "zzz"}, 956, names)
+    assert nobody.direct_text is None and nobody.to_model.startswith("Nadie con ese nombre")
+
+
 async def test_analysis_rows_reach_the_model_with_codes_and_never_a_name():
     from duma.pseudonyms import Pseudonyms
 

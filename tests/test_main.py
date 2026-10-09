@@ -15,12 +15,15 @@ class FakeTelegram:
         self.edit_keyboards = []
         self.albums = []
         self.closed, self.undeletable = [], set()
+        # One entry per message of any kind, in order: True when it rang.
+        self.rang, self.renamed = [], []
         self.files = {"voz1": b"OggS fake", "csv1": "Nombre,Grupo\nAna,Maratón\n".encode(), "png1": b"\x89PNG fake"}
         self.attempts, self._topics, self._next = 0, topics, 500
         self.chat_error, self.chat_type, self.forum, self.status, self.can_manage = False, "supergroup", True, "administrator", True
 
-    async def send_message(self, chat_id, text, thread_id=None, reply_markup=None):
+    async def send_message(self, chat_id, text, thread_id=None, reply_markup=None, silent=False):
         self.sent.append((chat_id, text, thread_id))
+        self.rang.append(not silent)
         if reply_markup:
             self.keyboards.append([b["callback_data"] for b in reply_markup["inline_keyboard"][0]])
 
@@ -44,14 +47,20 @@ class FakeTelegram:
     async def set_my_commands(self, commands, chat_id):
         self.commands = (chat_id, [name for name, _ in commands])
 
-    async def send_document(self, chat_id, filename, content, caption="", thread_id=None):
+    async def edit_forum_topic(self, chat_id, thread_id, name):
+        self.renamed.append((thread_id, name))
+
+    async def send_document(self, chat_id, filename, content, caption="", thread_id=None, silent=False):
         self.documents.append((chat_id, filename, content, caption, thread_id))
+        self.rang.append(not silent)
 
-    async def send_photo(self, chat_id, filename, content, caption="", thread_id=None, mime="image/png"):
+    async def send_photo(self, chat_id, filename, content, caption="", thread_id=None, mime="image/png", silent=False):
         self.photos.append((chat_id, filename, content, caption, thread_id))
+        self.rang.append(not silent)
 
-    async def send_photos(self, chat_id, photos, caption="", thread_id=None):
+    async def send_photos(self, chat_id, photos, caption="", thread_id=None, silent=False):
         self.albums.append((chat_id, photos, caption, thread_id))
+        self.rang.append(not silent)
 
     async def send_chat_action(self, chat_id, thread_id=None, action="typing"):
         self.actions.append((chat_id, thread_id))
@@ -78,8 +87,9 @@ class FakeTelegram:
         self.created.append((chat_id, name))
         return self._next
 
-    async def forward_message(self, chat_id, from_chat_id, message_id, thread_id=None):
+    async def forward_message(self, chat_id, from_chat_id, message_id, thread_id=None, silent=False):
         self.forwarded.append((message_id, thread_id))
+        self.rang.append(not silent)
 
 
 class FakeAgent:
@@ -132,8 +142,8 @@ async def test_a_message_reaches_the_agent_and_both_the_direct_text_and_the_answ
     bot, tg, agent = make(settings, tmp_path)
     await bot.handle(msg("/ruun dame a ana"))
     assert agent.calls == [("dame a ana", 10)]
-    assert [t for _, t, _ in tg.sent] == ["directo", "respuesta"]
-    assert tg.actions == [(ADMIN, None)]
+    assert [t for _, t, _ in tg.sent] == ["directo\n\nrespuesta"]
+    assert tg.actions == [(ADMIN, None)] * 2
 
 
 async def test_topic_messages_are_answered_in_their_topic_with_their_own_session(settings, tmp_path):
@@ -156,7 +166,7 @@ async def test_messages_written_while_duma_was_down_are_skipped_not_answered(set
 async def test_the_general_topic_is_the_main_chat(settings, tmp_path):
     bot, tg, _ = make(settings, tmp_path)
     await bot.handle(msg("/ruun hola", is_topic_message=True, message_thread_id=1))
-    assert all(thread is None for _, _, thread in tg.sent) and tg.actions == [(ADMIN, None)]
+    assert all(thread is None for _, _, thread in tg.sent) and tg.actions == [(ADMIN, None)] * 2
     assert (10, 0) in bot._sessions and (10, 1) not in bot._sessions
 
 
@@ -237,7 +247,7 @@ async def test_a_session_past_the_limit_is_compacted_before_answering(settings, 
     session.messages.append("viejo")
     session.context_tokens = settings.session_max_tokens + 1
     await bot.handle(msg("sigue", is_topic_message=True, message_thread_id=77))
-    assert [t for _, t, _ in tg.sent] == [main_module.COMPACTING, "directo", "respuesta"]
+    assert [t for _, t, _ in tg.sent] == [main_module.COMPACTING, "directo\n\nrespuesta"]
     assert session.notes == "notas" and agent.calls == [("sigue", 10)]
 
 
@@ -296,8 +306,8 @@ async def test_a_request_in_general_opens_a_topic_and_is_answered_there(settings
     pointer = tg.sent[0]
     assert pointer[2] is None and "«dame el resumen de ana»" in pointer[1] and "t.me/c/1234567890/501" in pointer[1]
     # the direct text and the answer go to the topic, not to General
-    assert [(t, th) for _, t, th in tg.sent[1:]] == [("directo", 501), ("respuesta", 501)]
-    assert tg.actions == [(ADMIN, 501)]
+    assert [(t, th) for _, t, th in tg.sent[1:]] == [("directo\n\nrespuesta", 501)]
+    assert tg.actions == [(ADMIN, 501)] * 2
     assert (10, 501) in bot._sessions and (10, 0) not in bot._sessions
 
 
@@ -354,7 +364,7 @@ async def test_without_the_permission_it_answers_in_general_and_waits_before_try
     with caplog.at_level("WARNING", logger="duma"):
         await bot.handle(msg("/ruun uno"))
     assert "could not open a topic" in caplog.text
-    assert [(t, th) for _, t, th in tg.sent] == [("directo", None), ("respuesta", None)]  # answered in General
+    assert [(t, th) for _, t, th in tg.sent] == [("directo\n\nrespuesta", None)]  # answered in General
     assert (10, 0) in bot._sessions and tg.attempts == 1
 
     await bot.handle(msg("dos"))  # still within the wait: no new attempt
@@ -515,11 +525,52 @@ async def test_a_plain_message_in_general_gets_the_reminder_once_and_opens_nothi
     assert len(tg.sent) == 3
 
 
-async def test_ruun_without_a_question_asks_for_one(settings, tmp_path):
+async def test_a_bare_ruun_opens_a_topic_that_takes_its_name_from_the_first_question(settings, tmp_path):
     bot, tg, agent = make(settings, tmp_path, topics=True)
-    await bot.handle(msg("/ruun"))
     await bot.handle(msg("/ruun@DumaBot   "))
-    assert [t for _, t, _ in tg.sent] == [main_module.RUN_NEEDS_TEXT] * 2 and tg.created == [] and agent.calls == []
+    assert tg.created == [(ADMIN, main_module.NEW_TOPIC)] and agent.calls == [] and tg.forwarded == []
+    assert tg.sent[-1] == (ADMIN, main_module.READY, 501)
+
+    # A restart between the tap and the question: the topic still gets its name.
+    bot, tg, agent = make(settings, tmp_path, topics=True)
+    await bot.handle(msg("¿cuántos inactivos hay?", is_topic_message=True, message_thread_id=501))
+    await bot.handle(msg("¿y activos?", is_topic_message=True, message_thread_id=501))
+    assert tg.renamed == [(501, "¿cuántos inactivos hay?")]
+    assert [text for text, _ in agent.calls] == ["¿cuántos inactivos hay?", "¿y activos?"]
+
+
+async def test_a_typo_of_ruun_is_still_ruun_and_a_bare_one_inside_a_topic_just_answers(settings, tmp_path):
+    bot, tg, agent = make(settings, tmp_path, topics=True)
+    await bot.handle(msg("/runn ¿cuántos hay?"))
+    await bot.handle(msg("/run", is_topic_message=True, message_thread_id=501))
+    assert len(tg.created) == 1 and [text for text, _ in agent.calls] == ["¿cuántos hay?"]
+    assert tg.sent[-1] == (ADMIN, main_module.READY, 501)
+
+
+async def test_a_turn_goes_out_as_one_message_and_only_the_last_one_rings(settings, tmp_path):
+    from duma.tools import OutFile
+
+    class Busy(FakeAgent):
+        async def run(self, session, text, user, send):
+            await send("", files=[OutFile("a.png", b"1", photo=True)])
+            await send("ficha uno")
+            await send("", files=[OutFile("b.png", b"2", photo=True)])
+            await send("lista.csv: 80 filas.", files=[OutFile("lista.csv", b"x")])
+            await send("¿Guardo la regla?", buttons=[("Guardar", "c:1:y"), ("Cancelar", "c:1:n")])
+            return "respuesta"
+
+    bot, tg, _ = make(settings, tmp_path, topics=True, agent=Busy())
+    await bot.handle(msg("dime", is_topic_message=True, message_thread_id=7))
+    assert [[name for name, _ in photos] for _, photos, _, _ in tg.albums] == [["a.png", "b.png"]]
+    assert [(name, caption) for _, name, _, caption, _ in tg.documents] == [("lista.csv", "ficha uno\n\nlista.csv: 80 filas.\n\nrespuesta")]
+    assert [t for _, t, _ in tg.sent] == ["¿Guardo la regla?"]
+    assert tg.rang == [False, False, True]
+
+
+async def test_a_question_asked_in_general_rings_once_however_many_messages_it_takes(settings, tmp_path):
+    bot, tg, _ = make(settings, tmp_path, topics=True)
+    await bot.handle(msg("/ruun ¿cuántos hay?", message_id=1))
+    assert tg.rang == [False, False, True]  # the copy of the request, the link in General, the answer
 
 
 async def test_ruun_inside_a_topic_asks_there_and_a_plain_message_still_works(settings, tmp_path):
@@ -610,7 +661,7 @@ async def test_the_answer_that_reaches_the_budget_says_so_and_the_next_question_
     assert budget.spent() == 1.0 and main_module.BUDGET_REACHED.format(limit=2.0) not in [t for _, t, _ in tg.sent]
 
     await bot.handle(msg("y dos", is_topic_message=True, message_thread_id=501))
-    assert tg.sent[-1] == (ADMIN, main_module.BUDGET_REACHED.format(limit=2.0), 501)
+    assert tg.sent[-1] == (ADMIN, "directo\n\nrespuesta\n\n" + main_module.BUDGET_REACHED.format(limit=2.0), 501)
 
     opened = len(tg.created)
     await bot.handle(msg("/ruun tres", message_id=3))  # refused in General, and no topic is opened for it
@@ -922,7 +973,7 @@ async def test_a_voice_note_is_shown_as_understood_and_then_asked_as_text(settin
     bot, tg, agent = with_voice(settings, tmp_path, ears)
     await bot.handle(msg(**VOICE))
     assert ears.heard == [b"OggS fake"] and agent.calls == [("¿cuántos inactivos hay?", 10)]
-    assert [t for _, t, _ in tg.sent] == [media.HEARD.format(text="¿cuántos inactivos hay?"), "directo", "respuesta"]
+    assert [t for _, t, _ in tg.sent] == [media.HEARD.format(text="¿cuántos inactivos hay?"), "directo\n\nrespuesta"]
     log = (tmp_path / "audit.log").read_text(encoding="utf-8")
     assert '"file": "voice"' in log and '"seconds": 4' in log and "inactivos" not in log
 
