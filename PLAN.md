@@ -79,9 +79,10 @@ en [docs/duma-como-te-lo-presento.docx](docs/duma-como-te-lo-presento.docx)):**
 - **Respuestas de José Adrián (9-oct):** aceptó las recomendaciones del documento. Tras verlo en el grupo pidió
   dos cosas, escritas el 9-oct y sin subir: que pregunte cuál evento cuando el nombre coincide con varios
   (`Toolbox._filtered` detiene la consulta y manda los botones, uno por evento y «Ambos» o «Todos») y la diferencia en verde cuando se superó el
-  objetivo. También en código: un año o distancia que el admin no escribió (`Toolbox._not_guessed`) y un nombre
-  de grupo que coincide con varios. Hueco que queda: si ninguna palabra del nombre del evento la escribió el admin
-  («el maratón de este domingo»), no hay con qué comparar y solo manda el prompt.
+  objetivo. También en código: un nombre de grupo que coincide con varios. **Decisión de Alex (9-oct):** Duma no
+  se robotiza. Se quitó la comparación palabra por palabra contra lo que escribió el admin (subió y bajó el mismo
+  día): en código solo queda lo ambiguo de verdad (el nombre coincide con varios); si «este año» o el contexto
+  bastan lo decide el modelo con el prompt.
 - **Editar un evento en la consola borraba objetivos y resultados (arreglado el 9-oct, API `9778c17`).** `update_event`
   (`muungano-api/routers/roster.py`, `PUT /v2/events`) borra todas las inscripciones y las reinserta solo con
   `id_event` e `id_user`; el espejo (`_set_event_members`, `services/legacy.py`) hace lo mismo en MySQL. Las 7 de

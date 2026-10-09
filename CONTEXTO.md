@@ -58,8 +58,8 @@ Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/
 Si el nombre de un evento o de un grupo coincide con más de los que se pidieron (otro año, otra distancia, «42k
 MTY» con sus varios ritmos), la consulta no sale: el admin recibe la pregunta con un botón por opción y «Ambos» o
 «Todos» (`Toolbox._filtered`, `which_event` y `which_group`, `duma/tools.py`); con ocho o más, Duma pregunta en
-palabras. Lo mismo si el modelo acotó un evento con un año o una distancia que el admin no escribió en ese tema y
-sin eso había más de uno (`Toolbox._not_guessed`; lo escrito llega desde `_said`, `duma/agent.py`).
+palabras. Cuándo un «este año» o el contexto bastan para no preguntar lo decide el modelo, con las reglas de
+`prompts/system.md`.
 
 **Filtros** de `buscar_atletas`, `cifras`, `consultar` y `grafica`, combinables: evento, pago en un periodo, grupo
 (uno o varios), entrenos hechos, membresía (vigente, vencida, sin membresía, vence en un periodo), comprobante
@@ -169,4 +169,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (305 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (304 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.

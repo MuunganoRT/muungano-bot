@@ -23,9 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-import re
 import unicodedata
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Awaitable, Optional
@@ -992,14 +990,6 @@ TOO_MANY_EVENTS = (
 )
 
 
-# What the admin wrote in the conversation the running tool belongs to. Per task: one Toolbox serves every topic.
-_SAID: ContextVar[Optional[set[str]]] = ContextVar("said", default=None)
-
-
-def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", _fold(text))
-
-
 class AmbiguousEvent(Exception):
     """An event name that fits more races than the admin asked for."""
 
@@ -1417,10 +1407,8 @@ class Toolbox:
         args: dict[str, Any],
         telegram_user_id: int,
         names: Optional[Pseudonyms] = None,
-        said: Optional[str] = None,
     ) -> ToolResult:
         names = names if names is not None else Pseudonyms()
-        _SAID.set(set(_words(said)) if said is not None else None)
         handlers = {
             "buscar_atleta": lambda a, u: self._search(a, u, names),
             "resumen_atleta": self._summary,
@@ -1486,33 +1474,7 @@ class Toolbox:
         groups = list(dict.fromkeys((found.get("matched") or {}).get("groups") or []))
         if named and len(groups) > named:
             raise AmbiguousGroup(groups)
-        for f in body.get("filters") or []:
-            if f.get("type") == "event":
-                await self._not_guessed(f, telegram_user_id)
         return found
-
-    async def _not_guessed(self, event: dict[str, Any], telegram_user_id: int) -> None:
-        """Stop an event filter the model narrowed by itself: a year or a distance the admin never wrote.
-
-        "Los de Berlin" asked as `42k Berlin 2026` fits one race, so nothing above objects. Asked again with only
-        the admin's own words, it fits three: that is the question to put to them.
-        """
-        said = _SAID.get()
-        if said is None:
-            return
-        words = _words(event["name"])
-        own = [w for w in words if w in said]
-        year = event.get("year")
-        year_said = year is None or str(year) in said
-        if (own == words and year_said) or len(" ".join(own)) < 2:
-            return
-        probe = {k: v for k, v in event.items() if k != "year" or year_said}
-        probe["name"] = " ".join(own)
-        body = {"filters": [probe], "member_status": "all", "count_only": True}
-        found = await self._api.post("/assistant/athletes/query", telegram_user_id=telegram_user_id, json=body)
-        events = (found.get("matched") or {}).get("events") or []
-        if len(events) > 1:
-            raise AmbiguousEvent(events)
 
     async def _search(self, args: dict[str, Any], telegram_user_id: int, names: Pseudonyms) -> ToolResult:
         if args.get("filtros"):
