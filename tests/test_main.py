@@ -567,6 +567,34 @@ async def test_a_turn_goes_out_as_one_message_and_only_the_last_one_rings(settin
     assert tg.rang == [False, False, True]
 
 
+async def test_a_doubt_goes_out_alone_and_a_table_of_its_own_leaves_the_lookups_behind(settings, tmp_path):
+    from duma.tools import OutFile, choice_buttons
+
+    class Doubting(FakeAgent):
+        async def run(self, session, text, user, send):
+            await send("", files=[OutFile("entrenos.png", b"1", photo=True)])
+            await send("ficha de alguien")
+            await send("¿Cuál evento?", buttons=choice_buttons(["Berlin 2026", "Berlin 2025", "Ambos"], user))
+            return "Te mandé lo de 2026 por si acaso."
+
+    bot, tg, _ = make(settings, tmp_path, topics=True, agent=Doubting())
+    await bot.handle(msg("los de berlin", is_topic_message=True, message_thread_id=7))
+    assert [t for _, t, _ in tg.sent] == ["¿Cuál evento?"] and tg.photos == [] and tg.albums == [] and tg.rang == [True]
+
+    class Building(FakeAgent):
+        async def run(self, session, text, user, send):
+            for n in range(17):
+                await send("", files=[OutFile(f"entrenos_{n}.png", b"1", photo=True)])
+            await send("ficha de alguien")
+            await send("", files=[OutFile("tabla.png", b"2", photo=True, own=True)])
+            return "Los 17, con su tirada más larga."
+
+    bot, tg, _ = make(settings, tmp_path, topics=True, agent=Building())
+    await bot.handle(msg("la tirada más larga de cada uno", is_topic_message=True, message_thread_id=7))
+    assert [(name, caption) for _, name, _, caption, _ in tg.photos] == [("tabla.png", "Los 17, con su tirada más larga.")]
+    assert tg.albums == [] and tg.sent == [] and tg.rang == [True]
+
+
 async def test_a_question_asked_in_general_rings_once_however_many_messages_it_takes(settings, tmp_path):
     bot, tg, _ = make(settings, tmp_path, topics=True)
     await bot.handle(msg("/ruun ¿cuántos hay?", message_id=1))

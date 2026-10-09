@@ -834,6 +834,13 @@ class Bot:
                 self._budget.add((cost_usd(self._s.model, session.usage) or 0.0) - before)
                 reached = self._budget.exhausted()
             await self._save(user_id, thread_id or 0)
+        asked = [item for item in outbox if item[2] and parse_choice(item[2][0][1])]
+        if asked:
+            # A doubt comes before the answer, never after it: the question goes out alone.
+            outbox, answer = asked, None
+        elif any(f.own for _, files, _ in outbox for f in files):
+            # The model drew its own table: what it looked up to build it was input, not an answer.
+            outbox = [item for item in outbox if item[2] or any(f.own for f in item[1])]
         if answer:
             outbox.append((answer, [], None))
         if reached:

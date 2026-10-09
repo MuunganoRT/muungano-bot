@@ -47,6 +47,8 @@ class OutFile:
     # Shown in the chat as a picture instead of attached as a download.
     photo: bool = False
     mime: str = "image/png"
+    # The model's own table (`tabla`): what it looked up on the way to it stays out of the chat.
+    own: bool = False
 
 
 @dataclass
@@ -460,8 +462,8 @@ SCHEMAS: list[dict[str, Any]] = [
         "description": (
             "Hace una pregunta al administrador con un botón por opción, para que conteste con un toque en vez de "
             "escribir. Es la ÚNICA forma de dar a elegir: úsala siempre que haya opciones concretas (cuál grupo, cuál "
-            "evento, cuál año, cuál periodo, cuál métrica), también cuando ya contestaste algo y ofreces el siguiente "
-            "paso («¿te traigo la de 2026, la de 2025 o las dos?»). Nunca escribas las opciones como texto. Cada "
+            "evento, cuál año, cuál periodo, cuál métrica) y ANTES de contestar, no después de haber entregado algo. "
+            "La pregunta sale sola: nada más de ese turno llega al chat. Nunca escribas las opciones como texto. Cada "
             "opción es el texto del botón: corto, que se entienda solo, con el nombre real y el dato que ayuda a "
             "elegir («Berlin 2026 · 7 inscritos», «42k MTY, los 5 grupos»). Incluye «Ambos» o «Todos» si aplica. La "
             "pregunta puede llevar antes, en una o dos líneas, lo que encontraste. Después de llamarla no hagas nada "
@@ -1043,13 +1045,13 @@ LOOKUPS = {
 }
 WHICH_EVENT = "Ese nombre coincide con varios eventos. ¿Cuál quieres?"
 ASKED_WHICH_EVENT = (
-    "Ese nombre coincide con varios eventos: {events}. No mandé la consulta; ya le pregunté cuál con botones. No hagas "
+    "Ese nombre coincide con varios eventos: {events}. No mandé la consulta; ya le pregunté cuál con botones y la pregunta sale sola. No hagas "
     "nada más en este turno: su respuesta llega como su siguiente mensaje. Entonces repite la consulta con el nombre "
     "exacto y `anio`; si elige «{everything}», pon un filtro de evento por cada uno."
 )
 WHICH_GROUP = "Ese nombre coincide con varios grupos. ¿Cuál quieres?"
 ASKED_WHICH_GROUP = (
-    "Ese nombre coincide con varios grupos: {groups}. No mandé la consulta; ya le pregunté cuál con botones. No hagas "
+    "Ese nombre coincide con varios grupos: {groups}. No mandé la consulta; ya le pregunté cuál con botones y la pregunta sale sola. No hagas "
     "nada más en este turno: su respuesta llega como su siguiente mensaje. Entonces repite la consulta con el nombre "
     "exacto; si elige «{everything}», pon uno en `nombre` y los demás en `otros`."
 )
@@ -1689,7 +1691,8 @@ class Toolbox:
             raise ValueError("two options say the same")
         return ToolResult(
             question,
-            "Pregunta enviada con botones. No hagas nada más en este turno: la respuesta llega como su siguiente mensaje.",
+            "Pregunta enviada con botones, sola: nada más de este turno sale al chat, tampoco lo que ya habías "
+            "consultado. No hagas nada más: la respuesta llega como su siguiente mensaje y entonces contestas.",
             buttons=choice_buttons(labels, telegram_user_id),
         )
 
@@ -1718,10 +1721,14 @@ class Toolbox:
             widths[widths.index(max(widths))] -= 1
         columns = [(heads[i], float(widths[i]), aligns[i]) for i in range(len(heads))]
         drawn = [[_clip(cell, widths[i] - pad[i]) for i, cell in enumerate(row)] for row in table]
-        return await self._deliver(
+        result = await self._deliver(
             _format(args), "tabla", "Tabla", title, subtitle, columns, drawn, heads, table,
-            f"Tabla «{title}» de {len(table)} fila(s).",
+            f"Tabla «{title}» de {len(table)} fila(s). Es lo único que sale al chat de este turno, junto con tu "
+            "texto: las tablas y fichas que consultaste para armarla no se mandan.",
         )
+        for file in result.files:
+            file.own = True
+        return result
 
     async def _missing(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
         # The audit log already records every tool call with its arguments: that line is the note.
@@ -1855,7 +1862,8 @@ class Toolbox:
             unique = len(candidates) <= MAX_CHOICES and len(set(labels)) == len(labels)
             return ToolResult(
                 render_candidates(candidates, len(candidates), question=True),
-                f"Hay {len(candidates)} candidatos; ya le pregunté al administrador cuál. Espera su respuesta.",
+                f"Hay {len(candidates)} candidatos; ya le pregunté al administrador cuál y la pregunta sale sola: nada "
+                "más de este turno llega al chat. Espera su respuesta.",
                 buttons=choice_buttons(labels, telegram_user_id) if unique else None,
             )
         return candidates[0]["id"]

@@ -148,6 +148,10 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
   (`Bot._flush`, `duma/main.py`): las imágenes como un álbum, los archivos, y el texto al pie del último si cabe o
   como mensaje aparte; las tarjetas con botones van después, cada una en su mensaje. Solo el último mensaje del
   turno notifica; los demás salen en silencio, igual que «Entendí: …» de una nota de voz y «Compactando sesión…».
+- **La duda sale sola.** Si en el turno hay una pregunta con botones de opción, solo sale esa pregunta: lo demás
+  que se haya consultado no llega al chat (`Bot._ask`, `duma/main.py`).
+- **Con una tabla propia, lo consultado no sale.** Si el modelo mandó su `tabla`, las tablas y fichas que usó para
+  armarla se quedan fuera; sale la suya con su texto.
 - Tablas (entrenos, vueltas, plan, pagos, comprobantes, solicitudes, errores de Garmin, avisos enviados): imagen hasta 40 filas, CSV si son más, o un álbum de
   imágenes repartidas parejo si el admin pide imagen (`Toolbox._deliver` y `_tables`, `duma/tools.py`).
 - Gráficas como imagen (`duma/charts.py`).
@@ -172,4 +176,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (309 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (310 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
