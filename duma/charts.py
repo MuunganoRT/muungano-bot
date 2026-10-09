@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 import math
 import random
-from typing import Any
+from typing import Any, Optional
 
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
@@ -224,6 +224,7 @@ TABLE_INK = "#ffffff"
 TABLE_MUTED = "#a1a1aa"
 TABLE_RULE = "#3f3f46"
 TABLE_BRAND = "#f08a1c"
+TABLE_GOOD = "#34d399"
 TABLE_FOOTER = "Duma · Muungano Running Team"
 TABLE_WIDTH_IN = 9.0
 TABLE_ROW_IN = 0.46
@@ -262,8 +263,18 @@ def _spots(axes: Any, height: float) -> None:
         axes.add_patch(_spot(x / TABLE_WIDTH_IN, y / height, radius / height, rng.uniform(0.6, 1.1), rng, TABLE_WIDTH_IN / height))
 
 
-def table_png(label: str, title: str, subtitle: str, columns: list[tuple[str, float, str]], rows: list[list[str]]) -> bytes:
-    """A table as a picture. Each column is (heading, relative width, "left" or "right"); the last one is highlighted."""
+def table_png(
+    label: str,
+    title: str,
+    subtitle: str,
+    columns: list[tuple[str, float, str]],
+    rows: list[list[str]],
+    colors: Optional[dict[tuple[int, int], str]] = None,
+) -> bytes:
+    """A table as a picture. Each column is (heading, relative width, "left" or "right"); the last one is highlighted.
+
+    `colors` overrides the colour of single cells, by (row, column).
+    """
     if not rows or len(rows) > TABLE_MAX_ROWS or any(len(row) != len(columns) for row in rows):
         raise ValueError(f"a table takes 1 to {TABLE_MAX_ROWS} rows, each with one cell per column")
     height = 2.65 + TABLE_ROW_IN * len(rows)
@@ -299,6 +310,7 @@ def table_png(label: str, title: str, subtitle: str, columns: list[tuple[str, fl
         y = line - step * (n + 0.5)
         for i, ((_, _, align), x, cell) in enumerate(zip(columns, anchors, row)):
             color = TABLE_MUTED if cell == EMPTY_CELL else TABLE_BRAND if i == last else TABLE_INK
+            color = (colors or {}).get((n, i), color)
             weight = "bold" if i in (0, last) else "normal"
             axes.text(x, y, cell, color=color, fontsize=13.5, fontweight=weight, fontfamily=FONT, ha=align, va="center")
         axes.plot([left, right], [y - step / 2] * 2, color=TABLE_RULE, linewidth=0.6)

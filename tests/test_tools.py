@@ -520,8 +520,8 @@ async def test_the_entrants_of_one_race_go_out_as_a_single_titled_picture(monkey
 
     drawn = {}
 
-    def fake_png(label, title, subtitle, columns, rows):
-        drawn.update(title=title, subtitle=subtitle, heads=[c[0] for c in columns], rows=rows)
+    def fake_png(label, title, subtitle, columns, rows, colors=None):
+        drawn.update(title=title, subtitle=subtitle, heads=[c[0] for c in columns], rows=rows, colors=colors)
         return b"png"
 
     monkeypatch.setattr(charts, "table_png", fake_png)
@@ -541,8 +541,30 @@ async def test_the_entrants_of_one_race_go_out_as_a_single_titled_picture(monkey
         ["Ana Peña", "Maratón", "1:35:00", "1:30:51", "-0:04:09"],
         ["Ana Ruiz", "Fondo 10K", "sin capturar", "sin resultado", charts.EMPTY_CELL],
     ]
+    # Under the goal is green; nothing else changes colour.
+    assert drawn["colors"] == {(0, 4): charts.TABLE_GOOD}
     assert r.to_model.startswith("2 inscrito(s) a 21k San Diego (2026-05-31): 1 con objetivo capturado, 1 con resultado.")
     assert "Ana" not in r.to_model
+
+
+async def test_an_event_name_that_fits_several_races_asks_which_with_a_button_for_each_and_one_for_both():
+    api = FakeApi([ANA_P])
+    api.matched = {"events": ["42k Berlin 2025 (2025-09-21)", "42k Berlin 2026 (2026-09-27)"]}
+    berlin = {"filtros": [{"tipo": "evento", "nombre": "berlin"}]}
+    for tool, args in (("buscar_atletas", berlin), ("consultar", berlin), ("cifras", {**berlin, "metricas": ["personas"]})):
+        r = await Toolbox(api).run(tool, args, 956)
+        assert not r.files and r.direct_text == "Ese nombre coincide con varios eventos. ¿Cuál quieres?", tool
+        assert [label for label, _ in r.buttons] == ["42k Berlin 2025 · 21 sep 2025", "42k Berlin 2026 · 27 sep 2026", "Ambos"]
+        assert "42k Berlin 2025 (2025-09-21); 42k Berlin 2026 (2026-09-27)" in r.to_model and "No hagas nada más" in r.to_model
+
+    api.matched = {"events": [f"Carrera {n} (2026-01-0{n})" for n in range(1, 9)]}
+    many = await Toolbox(api).run("buscar_atletas", berlin, 956)
+    assert many.is_error and many.buttons is None and "8 eventos" in many.to_model
+    api.matched = {"events": ["42k Berlin 2025 (2025-09-21)", "42k Berlin 2026 (2026-09-27)"]}
+
+    # Two races asked for by name are two races, not a doubt.
+    both = {"filtros": [{"tipo": "evento", "nombre": "berlin", "anio": 2025}, {"tipo": "evento", "nombre": "berlin", "anio": 2026}]}
+    assert not (await Toolbox(api).run("buscar_atletas", both, 956)).is_error
 
 
 async def test_a_name_is_looked_up_among_those_a_filter_matches_and_comes_back_as_a_code():

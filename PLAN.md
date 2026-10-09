@@ -76,7 +76,11 @@ en [docs/duma-como-te-lo-presento.docx](docs/duma-como-te-lo-presento.docx)):**
 - **Abrir temas (escrito el 9-oct, sin subir).** `/ruun` sin texto abre «Nueva pregunta», contesta «Sí, dime» y
   renombra el tema con la primera pregunta; `/run`, `/runn` y `/duma` son alias. Los temas que esperan nombre
   se guardan en `state/untitled.topics`.
-- **Respuestas de José Adrián (9-oct):** aceptó las recomendaciones del documento.
+- **Respuestas de José Adrián (9-oct):** aceptó las recomendaciones del documento. Tras verlo en el grupo pidió
+  dos cosas, escritas el 9-oct y sin subir: que pregunte cuál evento cuando el nombre coincide con varios
+  (`Toolbox._filtered` detiene la consulta y manda los botones, uno por evento y «Ambos» o «Todos») y la diferencia en verde cuando se superó el
+  objetivo. Hueco conocido: si el modelo pone `anio` por su cuenta y eso deja un solo evento, el código no lo
+  detiene; ahí solo manda el prompt.
 - **Editar un evento en la consola borraba objetivos y resultados (arreglado el 9-oct, API `9778c17`).** `update_event`
   (`muungano-api/routers/roster.py`, `PUT /v2/events`) borra todas las inscripciones y las reinserta solo con
   `id_event` e `id_user`; el espejo (`_set_event_members`, `services/legacy.py`) hace lo mismo en MySQL. Las 7 de

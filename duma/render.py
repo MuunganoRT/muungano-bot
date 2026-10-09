@@ -138,8 +138,8 @@ def _gap(goal: int, result: Any, words: bool = False) -> str:
     """Result minus goal, signed: `-0:02:45` is under the goal. In words for a spreadsheet, where a leading sign is a formula."""
     delta = int(result) - goal
     if words:
-        return f"{_race_time(abs(delta))} {'menos' if delta < 0 else 'más'}"
-    return ("-" if delta < 0 else "+") + _race_time(abs(delta))
+        return f"{_race_time(abs(delta))} {'menos' if delta < 0 else 'más'}" if delta else "en el objetivo"
+    return ("-" if delta < 0 else "+" if delta else "") + _race_time(abs(delta))
 
 
 def _money(amount: float) -> str:

@@ -49,11 +49,15 @@ Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/
 | `solicitudes` | quién pidió entrar y nadie ha aceptado: pendientes, en lista de espera o rechazadas |
 | `errores_garmin` | entrenos que Garmin rechazó y no llegaron al reloj, con el motivo y si se sigue reintentando |
 | `avisos_enviados` | avisos mandados por correo o push, con cuántos aceptó cada canal |
-| `buscar_atletas` | lista de quienes cumplen unos filtros. Con solo un filtro de evento, la imagen «Registro a <carrera>»: atleta, grupo, tiempo objetivo, resultado y diferencia |
+| `buscar_atletas` | lista de quienes cumplen unos filtros. Con solo un filtro de evento, la imagen «Registro a <carrera>»: atleta, grupo, tiempo objetivo, resultado y diferencia, en verde cuando el resultado iguala o mejora el objetivo |
 | `cifras` | totales de un conjunto: personas, pagos, entrenos, km, score |
 | `consultar` | una fila por persona para comparar o razonar (tope de 60); con filtro de evento, el tiempo objetivo que capturó al inscribirse, su resultado y la diferencia |
 | `grafica` | por semana, ranking o dispersión del score, como imagen |
 | `catalogo`, `preguntar` | nombres de grupos y eventos; una pregunta al admin con botones |
+
+Si el nombre de un evento coincide con más eventos de los que se pidieron (otro año, otra distancia), la consulta
+no sale: el admin recibe la pregunta con un botón por evento y «Ambos» o «Todos» (`Toolbox._filtered` y
+`which_event`, `duma/tools.py`); con ocho o más, Duma pregunta en palabras.
 
 **Filtros** de `buscar_atletas`, `cifras`, `consultar` y `grafica`, combinables: evento, pago en un periodo, grupo
 (uno o varios), entrenos hechos, membresía (vigente, vencida, sin membresía, vence en un periodo), comprobante
@@ -163,4 +167,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (302 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (303 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.

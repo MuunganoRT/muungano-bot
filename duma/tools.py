@@ -967,6 +967,46 @@ WORKOUT_COLUMNS = [
     ("Fecha", 1.1, "left"), ("Tipo", 2.0, "left"), ("Km", 1.0, "right"), ("Tiempo", 1.3, "right"),
     ("Ritmo", 1.0, "right"), ("FC", 0.8, "right"), ("Score", 1.0, "right"),
 ]
+WHICH_EVENT = "Ese nombre coincide con varios eventos. ¿Cuál quieres?"
+ASKED_WHICH_EVENT = (
+    "Ese nombre coincide con varios eventos: {events}. No mandé la consulta; ya le pregunté cuál con botones. No hagas "
+    "nada más en este turno: su respuesta llega como su siguiente mensaje. Entonces repite la consulta con el nombre "
+    "exacto y `anio`; si elige «{everything}», pon un filtro de evento por cada uno."
+)
+# Too many to fit as buttons: the model narrows it down in words.
+TOO_MANY_EVENTS = (
+    "Ese nombre coincide con {count} eventos: {events}. No mandé nada al chat. Pregúntale de qué año o distancia y "
+    "repite la consulta con el nombre exacto y `anio`."
+)
+
+
+class AmbiguousEvent(Exception):
+    """An event name that fits more races than the admin asked for."""
+
+    def __init__(self, events: list[str]):
+        super().__init__("; ".join(events))
+        self.events = events
+
+
+def _event_label(matched: str) -> str:
+    """`42k Berlin 2026 (2026-09-27)` -> `42k Berlin 2026 · 27 sep 2026`, short enough for a button."""
+    name, _, day = matched.rpartition(" (")
+    when = _day_year(day.rstrip(")")) if name else ""
+    name = name or matched
+    return f"{_clip(name, CHOICE_LABEL_MAX - len(when) - 3)} · {when}" if when else _clip(name, CHOICE_LABEL_MAX)
+
+
+def which_event(events: list[str], telegram_user_id: int) -> ToolResult:
+    """The question the admin gets instead of a result built on a guess: one button per race, and one for all."""
+    labels = [_event_label(e) for e in events]
+    if len(events) >= MAX_CHOICES or len(set(labels)) != len(labels):
+        return ToolResult(None, TOO_MANY_EVENTS.format(count=len(events), events="; ".join(events)), is_error=True)
+    everything = "Ambos" if len(events) == 2 else "Todos"
+    return ToolResult(
+        WHICH_EVENT,
+        ASKED_WHICH_EVENT.format(events="; ".join(events), everything=everything),
+        buttons=choice_buttons([*labels, everything], telegram_user_id),
+    )
 ROSTER_COLUMNS = [
     ("Atleta", 3.0, "left"), ("Grupo", 2.2, "left"), ("Objetivo", 1.5, "right"),
     ("Resultado", 1.6, "right"), ("Diferencia", 1.2, "right"),
@@ -1369,6 +1409,8 @@ class Toolbox:
             return ToolResult(None, f"Unknown tool {name!r}", is_error=True)
         try:
             return await handler(args, telegram_user_id)
+        except AmbiguousEvent as exc:
+            return which_event(exc.events, telegram_user_id)
         except PreferenceError as exc:
             return ToolResult(None, f"No se puede guardar: {exc}", is_error=True)
         except ValueError as exc:
@@ -1385,6 +1427,15 @@ class Toolbox:
             params={"q": text, "member_status": member_status},
         )
 
+    async def _filtered(self, path: str, telegram_user_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        """A query by filters. Stopped when an event name fits more races than were asked for: nothing leaves on a guess."""
+        found = await self._api.post(path, telegram_user_id=telegram_user_id, json=body)
+        asked = sum(1 for f in body.get("filters") or [] if f.get("type") == "event")
+        events = (found.get("matched") or {}).get("events") or []
+        if asked and len(events) > asked:
+            raise AmbiguousEvent(events)
+        return found
+
     async def _search(self, args: dict[str, Any], telegram_user_id: int, names: Pseudonyms) -> ToolResult:
         if args.get("filtros"):
             return await self._search_within(args, telegram_user_id, names)
@@ -1399,7 +1450,7 @@ class Toolbox:
         """A name among those a filter matches: "Ari, la de Berlin". A few hits go to the model as codes, not to the chat."""
         wanted = _fold(_text(args, "texto"))
         body = {"filters": _filters(args), "member_status": _member_status(args), "limit": QUERY_LIMIT}
-        found = await self._api.post("/assistant/athletes/query", telegram_user_id=telegram_user_id, json=body)
+        found = await self._filtered("/assistant/athletes/query", telegram_user_id, body)
         hits = [a for a in found["athletes"] if wanted in _fold(a["name"])]
         if not hits:
             return ToolResult(None, f"Nadie con ese nombre entre las {found['total']} persona(s) de esos filtros.{_understood(found)}")
@@ -1421,7 +1472,7 @@ class Toolbox:
             body["count_only"] = True
         else:
             body["limit"] = QUERY_LIMIT
-        found = await self._api.post("/assistant/athletes/query", telegram_user_id=telegram_user_id, json=body)
+        found = await self._filtered("/assistant/athletes/query", telegram_user_id, body)
 
         total = found["total"]
         if count_only:
@@ -1455,6 +1506,7 @@ class Toolbox:
             return None
         event = entries[0][0]
         rows, with_goal, with_result = [], 0, 0
+        beaten: dict[tuple[int, int], str] = {}
         for athlete, (entry,) in zip(athletes, entries):
             goal, result = _goal_seconds(entry.get("goal")), entry.get("time_result")
             with_goal += bool(goal)
@@ -1466,6 +1518,8 @@ class Toolbox:
                 _race_time(result) if result else "sin resultado",
                 _gap(goal, result) if goal and result else charts.EMPTY_CELL,
             ])
+            if goal and result and int(result) <= goal:
+                beaten[(len(rows) - 1, len(ROSTER_COLUMNS) - 1)] = charts.TABLE_GOOD
         total = len(athletes)
         to_model = (
             f"{total} inscrito(s) a {event['event']} ({event['date']}): {with_goal} con objetivo capturado, "
@@ -1479,6 +1533,7 @@ class Toolbox:
             ROSTER_COLUMNS,
             rows,
             to_model,
+            colors=beaten,
         )
 
     async def _propose_preference(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
@@ -1541,7 +1596,7 @@ class Toolbox:
             if start > end:
                 raise ValueError("`desde` is after `hasta`")
             body["period"] = {"from": start, "to": end}
-        found = await self._api.post("/assistant/athletes/aggregate", telegram_user_id=telegram_user_id, json=body)
+        found = await self._filtered("/assistant/athletes/aggregate", telegram_user_id, body)
         return ToolResult(None, _figures(found) + _understood(found))
 
     async def _analyze(self, args: dict[str, Any], telegram_user_id: int, names: Pseudonyms) -> ToolResult:
@@ -1552,7 +1607,7 @@ class Toolbox:
             raise ValueError("`desde` is after `hasta`")
         cap = ANALYZE_ROWS_WITH_PERIOD if start else ANALYZE_ROWS
         body = {"filters": _filters(args), "member_status": _member_status(args), "limit": cap}
-        found = await self._api.post("/assistant/athletes/query", telegram_user_id=telegram_user_id, json=body)
+        found = await self._filtered("/assistant/athletes/query", telegram_user_id, body)
         total = found["total"]
         if total > cap:
             # Part of the list would read as the whole list: the analysis would be wrong without saying so.
@@ -1638,7 +1693,7 @@ class Toolbox:
         if kind == "ranking":
             body["per_athlete"] = True
 
-        found = await self._api.post("/assistant/athletes/series", telegram_user_id=telegram_user_id, json=body)
+        found = await self._filtered("/assistant/athletes/series", telegram_user_id, body)
         weeks = found["weeks"]
         if one:
             who = found["athlete"]["name"]
@@ -2243,7 +2298,7 @@ class Toolbox:
             raise ValueError("Say who it is for: `todos`, `filtros` or `atletas`. If the admin did not say, ask.")
 
         body: dict[str, Any] = {"filters": filters, "athlete_ids": ids, "everyone": everyone}
-        found = await self._api.post("/assistant/messages/preview", telegram_user_id=telegram_user_id, json=body)
+        found = await self._filtered("/assistant/messages/preview", telegram_user_id, body)
         if found.get("notes"):
             # A name that matched nothing: sending to the rest would not be what was asked.
             return ToolResult(None, "No propuse nada." + _understood(found) + " Pregunta al administrador cuál quiso decir.")
@@ -2319,13 +2374,14 @@ class Toolbox:
         columns: list[tuple[str, float, str]],
         rows: list[list[str]],
         to_model: str,
+        colors: Optional[dict[tuple[int, int], str]] = None,
     ) -> ToolResult:
-        """The rows as one picture, or as an album when one cannot hold them."""
+        """The rows as one picture, or as an album when one cannot hold them. `colors` paints cells of a one-page table."""
         pages = _pages(rows)
         files = []
         for n, page in enumerate(pages, 1):
             mark = f"  ·  {n} de {len(pages)}" if len(pages) > 1 else ""
-            png = await asyncio.to_thread(charts.table_png, label, title, subtitle + mark, columns, page)
+            png = await asyncio.to_thread(charts.table_png, label, title, subtitle + mark, columns, page, colors if len(pages) == 1 else None)
             suffix = f"_{n}" if len(pages) > 1 else ""
             files.append(OutFile(f"{filename}{suffix}.png", png, photo=True))
         what = "La tabla ya salió al chat como imagen" if len(pages) == 1 else f"La tabla ya salió al chat en {len(pages)} imágenes"
