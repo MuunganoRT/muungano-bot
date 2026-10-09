@@ -430,16 +430,19 @@ SCHEMAS: list[dict[str, Any]] = [
         "name": "preguntar",
         "description": (
             "Hace una pregunta al administrador con un botón por opción, para que conteste con un toque en vez de "
-            "escribir. Úsala siempre que tengas que preguntar entre opciones concretas (cuál grupo, cuál evento, cuál "
-            "periodo, cuál métrica). Cada opción es el texto del botón: corto y que se entienda solo, con el nombre "
-            "real («42k MTY, los 5 grupos», «Berlin 4:00hr»). Incluye «Todos» si aplica. Después de llamarla no hagas "
-            "nada más en este turno: la opción elegida te llega como el siguiente mensaje del administrador. Para "
-            "una pregunta abierta, sin opciones, escríbela como texto."
+            "escribir. Es la ÚNICA forma de dar a elegir: úsala siempre que haya opciones concretas (cuál grupo, cuál "
+            "evento, cuál año, cuál periodo, cuál métrica), también cuando ya contestaste algo y ofreces el siguiente "
+            "paso («¿te traigo la de 2026, la de 2025 o las dos?»). Nunca escribas las opciones como texto. Cada "
+            "opción es el texto del botón: corto, que se entienda solo, con el nombre real y el dato que ayuda a "
+            "elegir («Berlin 2026 · 7 inscritos», «42k MTY, los 5 grupos»). Incluye «Ambos» o «Todos» si aplica. La "
+            "pregunta puede llevar antes, en una o dos líneas, lo que encontraste. Después de llamarla no hagas nada "
+            "más en este turno: la opción elegida te llega como el siguiente mensaje del administrador. Solo una "
+            "pregunta abierta, sin opciones posibles, va como texto."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "pregunta": {"type": "string", "description": "La pregunta, en una línea."},
+                "pregunta": {"type": "string", "description": "Lo que encontraste, si hace falta, y la pregunta. Máximo 600 caracteres."},
                 "opciones": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1639,7 +1642,7 @@ class Toolbox:
         )
 
     async def _ask(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
-        question = _text(args, "pregunta", minimum=3, maximum=300)
+        question = _text(args, "pregunta", minimum=3, maximum=600)
         options = args.get("opciones")
         if not isinstance(options, list) or not 2 <= len(options) <= MAX_CHOICES:
             raise ValueError(f"`opciones` must be a list of 2 to {MAX_CHOICES} texts")

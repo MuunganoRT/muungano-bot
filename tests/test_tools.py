@@ -808,6 +808,12 @@ async def test_an_api_without_the_listings_yet_still_names_groups_and_recent_eve
     assert (await box.run("catalogo", {"tipo": "convenios"}, 956)).is_error
 
 
+async def test_a_question_can_carry_what_was_found_before_its_buttons():
+    found = "Hay datos de dos ediciones del 42k Berlin.\n¿Cuál te traigo?"
+    r = await Toolbox(FakeApi([])).run("preguntar", {"pregunta": found, "opciones": ["Berlin 2026 · 7 inscritos", "Berlin 2025 · 12 inscritos", "Ambas"]}, 956)
+    assert r.direct_text == found and [label for label, _ in r.buttons] == ["Berlin 2026 · 7 inscritos", "Berlin 2025 · 12 inscritos", "Ambas"]
+
+
 async def test_what_could_not_be_fetched_is_noted_without_a_word_in_the_chat():
     r = await Toolbox(FakeApi([])).run("anotar_faltante", {"pedido": "teléfono de contacto de un atleta"}, 956)
     assert r.direct_text is None and not r.is_error and r.to_model.startswith("Anotado.")
