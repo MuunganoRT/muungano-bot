@@ -53,6 +53,7 @@ Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/
 | `cifras` | totales de un conjunto: personas, pagos, entrenos, km, score |
 | `consultar` | una fila por persona para comparar o razonar (tope de 60); con filtro de evento, el tiempo objetivo que capturó al inscribirse, su resultado y la diferencia |
 | `grafica` | por semana, ranking o dispersión del score, como imagen |
+| `tabla` | una tabla que el modelo arma con sus propias columnas y filas (cálculos, proyecciones), dibujada como imagen o CSV; los códigos de las celdas salen como nombres |
 | `catalogo` | qué existe, por tema y solo para el modelo: `eventos` de cualquier año (fecha, inscritos, con resultado), `grupos`, `convenios` y `calendario` (entrenos que pusieron los coaches, por título o tipo), con texto para acotar |
 | `preguntar` | una pregunta al admin con botones |
 | `anotar_faltante` | deja en `state/audit.log` lo que pidieron y ninguna herramienta pudo traer (evento `tool`, con el pedido) |
@@ -171,4 +172,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (308 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (309 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.

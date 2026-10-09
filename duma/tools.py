@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -405,6 +406,34 @@ SCHEMAS: list[dict[str, Any]] = [
                 "desde": {"type": "string", "description": "Solo `calendario`: YYYY-MM-DD. Sin fechas, 30 días atrás y 30 adelante."},
                 "hasta": {"type": "string", "description": "Solo `calendario`: YYYY-MM-DD."},
             },
+        },
+    },
+    {
+        "name": "tabla",
+        "description": (
+            "Dibuja una tabla TUYA y la manda al chat como imagen (o como CSV si es muy larga): la única forma de "
+            "mostrar una tabla, porque el chat no dibuja tablas de texto. Úsala cuando pidan una tabla, una imagen o "
+            "un comparativo, y siempre que vayas a dar cuatro o más filas de cifras que tú armaste: cálculos, "
+            "proyecciones, columnas que combinaste de varias consultas. Tú pones título, columnas y filas. Para una "
+            "persona escribe su código completo (`ATLETA_04`) en la celda: el chat muestra su nombre. No la uses "
+            "para repetir una tabla que otra herramienta ya mandó."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "titulo": {"type": "string", "description": "Título de la tabla, corto. Ejemplo: «Ciclo Chicago 2026»."},
+                "subtitulo": {"type": "string", "description": "Periodo o criterio, en una línea. Opcional."},
+                "columnas": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 7, "description": "Encabezados, cortos. La última columna se resalta."},
+                "filas": {
+                    "type": "array",
+                    "items": {"type": "array", "items": {"type": "string"}},
+                    "minItems": 1,
+                    "maxItems": 200,
+                    "description": "Una lista de celdas por fila, en el orden de las columnas. Celdas cortas.",
+                },
+                "formato": {"type": "string", "enum": ["auto", "imagen", "csv"], "description": "Por defecto `auto`: imagen hasta 40 filas, CSV si son más."},
+            },
+            "required": ["titulo", "columnas", "filas"],
         },
     },
     {
@@ -1001,6 +1030,10 @@ WORKOUT_COLUMNS = [
     ("Fecha", 1.1, "left"), ("Tipo", 2.0, "left"), ("Km", 1.0, "right"), ("Tiempo", 1.3, "right"),
     ("Ritmo", 1.0, "right"), ("FC", 0.8, "right"), ("Score", 1.0, "right"),
 ]
+DRAW_MAX_COLUMNS, DRAW_MAX_ROWS = 7, 200
+# About how many characters fit across a table picture, and the narrowest a column is squeezed to.
+DRAW_CHARS, DRAW_MIN_CHARS = 78, 8
+FIGURE = re.compile(r"[\d\s:.,%+\-–—/$]+|" + re.escape(charts.EMPTY_CELL))
 # Which listing answers each kind of thing, and the key its rows come under.
 LOOKUPS = {
     "eventos": ("/assistant/events", "events"),
@@ -1457,6 +1490,7 @@ class Toolbox:
             "cifras": self._aggregate,
             "catalogo": self._catalog,
             "anotar_faltante": self._missing,
+            "tabla": lambda a, u: self._draw(a, names),
             "preguntar": self._ask,
             "grafica": lambda a, u: self._chart(a, u, names),
             "consultar": lambda a, u: self._analyze(a, u, names),
@@ -1657,6 +1691,36 @@ class Toolbox:
             question,
             "Pregunta enviada con botones. No hagas nada más en este turno: la respuesta llega como su siguiente mensaje.",
             buttons=choice_buttons(labels, telegram_user_id),
+        )
+
+    async def _draw(self, args: dict[str, Any], names: Pseudonyms) -> ToolResult:
+        """A table the model put together itself, with the names put back in before it is drawn."""
+        title = _text(args, "titulo", maximum=60)
+        subtitle = _text(args, "subtitulo", maximum=90) if args.get("subtitulo") else ""
+        heads, rows = args.get("columnas"), args.get("filas")
+        if not isinstance(heads, list) or not 2 <= len(heads) <= DRAW_MAX_COLUMNS or not all(isinstance(h, str) and h.strip() for h in heads):
+            raise ValueError(f"`columnas` must be 2 to {DRAW_MAX_COLUMNS} headings")
+        if not isinstance(rows, list) or not 1 <= len(rows) <= DRAW_MAX_ROWS:
+            raise ValueError(f"`filas` must be 1 to {DRAW_MAX_ROWS} rows")
+        table: list[list[str]] = []
+        for row in rows:
+            if not isinstance(row, list) or len(row) != len(heads):
+                raise ValueError("each row must have one cell per column")
+            table.append([names.restore(" ".join(str(cell).split())) or charts.EMPTY_CELL for cell in row])
+        heads = [" ".join(h.split()) for h in heads]
+
+        # A column of figures reads from the right; one of words, from the left.
+        aligns = ["left" if i == 0 or not all(FIGURE.fullmatch(r[i]) for r in table) else "right" for i in range(len(heads))]
+        # The first column is drawn in bold, which runs wider than the count of its letters.
+        pad = [4] + [2] * (len(heads) - 1)
+        widths = [max(len(heads[i]), *(len(r[i]) for r in table)) + pad[i] for i in range(len(heads))]
+        while sum(widths) > DRAW_CHARS and max(widths) > DRAW_MIN_CHARS:
+            widths[widths.index(max(widths))] -= 1
+        columns = [(heads[i], float(widths[i]), aligns[i]) for i in range(len(heads))]
+        drawn = [[_clip(cell, widths[i] - pad[i]) for i, cell in enumerate(row)] for row in table]
+        return await self._deliver(
+            _format(args), "tabla", "Tabla", title, subtitle, columns, drawn, heads, table,
+            f"Tabla «{title}» de {len(table)} fila(s).",
         )
 
     async def _missing(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:

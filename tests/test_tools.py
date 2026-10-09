@@ -808,6 +808,38 @@ async def test_an_api_without_the_listings_yet_still_names_groups_and_recent_eve
     assert (await box.run("catalogo", {"tipo": "convenios"}, 956)).is_error
 
 
+async def test_the_model_draws_its_own_table_and_the_codes_become_names_in_the_picture(monkeypatch):
+    from duma import charts
+    from duma.pseudonyms import Pseudonyms
+
+    drawn = {}
+
+    def fake_png(label, title, subtitle, columns, rows, colors=None):
+        drawn.update(title=title, subtitle=subtitle, columns=columns, rows=rows)
+        return b"png"
+
+    monkeypatch.setattr(charts, "table_png", fake_png)
+    names = Pseudonyms()
+    names.code(10, "Ana Peña")
+    names.code(11, "Luis Ruiz")
+    args = {
+        "titulo": "Ciclo Chicago 2026",
+        "subtitulo": "19 jun al 9 oct 2026",
+        "columnas": ["Atleta", "Grupo", "Cumpl.", "Proyección"],
+        "filas": [["ATLETA_01", "Chicago 3:15", "72%", "3:35-3:50"], ["ATLETA_02", "Chicago 4:00", "94%", ""]],
+    }
+    r = await Toolbox(FakeApi([])).run("tabla", args, 956, names)
+    assert [f.name for f in r.files] == ["tabla.png"] and r.files[0].photo and "Ana" not in r.to_model
+    assert drawn["title"] == "Ciclo Chicago 2026" and drawn["subtitle"] == "19 jun al 9 oct 2026"
+    assert drawn["rows"] == [["Ana Peña", "Chicago 3:15", "72%", "3:35-3:50"], ["Luis Ruiz", "Chicago 4:00", "94%", charts.EMPTY_CELL]]
+    # Words read from the left, figures from the right.
+    assert [(head, align) for head, _, align in drawn["columns"]] == [("Atleta", "left"), ("Grupo", "left"), ("Cumpl.", "right"), ("Proyección", "right")]
+
+    long = await Toolbox(FakeApi([])).run("tabla", {**args, "filas": [["ATLETA_01", "x", "1%", "3:00"]] * 41}, 956, names)
+    assert [f.name for f in long.files] == ["tabla.csv"] and "Ana Peña".encode() in long.files[0].content
+    assert (await Toolbox(FakeApi([])).run("tabla", {**args, "filas": [["solo una celda"]]}, 956, names)).is_error
+
+
 async def test_a_question_can_carry_what_was_found_before_its_buttons():
     found = "Hay datos de dos ediciones del 42k Berlin.\n¿Cuál te traigo?"
     r = await Toolbox(FakeApi([])).run("preguntar", {"pregunta": found, "opciones": ["Berlin 2026 · 7 inscritos", "Berlin 2025 · 12 inscritos", "Ambas"]}, 956)

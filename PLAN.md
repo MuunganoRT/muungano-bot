@@ -65,8 +65,9 @@ en [docs/duma-como-te-lo-presento.docx](docs/duma-como-te-lo-presento.docx)):**
 - **Una respuesta por pregunta (escrito el 9-oct, sin subir).** El turno junta lo que producen las herramientas y
   el modelo y lo manda al final como un álbum, los archivos y el texto al pie; solo el último mensaje notifica
   (`Bot._flush`, `duma/main.py`). Los inscritos a un evento salen como una imagen «Registro a <carrera>»
-  (`Toolbox._roster`, `duma/tools.py`). **Falta, si hace falta:** que el modelo arme tablas a su gusto con una
-  herramienta `presentar` (título, columnas, filas); hoy elige entre las tablas que ya existen.
+  (`Toolbox._roster`, `duma/tools.py`). Desde el 9-oct el modelo también arma sus propias tablas con `tabla`
+  (título, columnas, filas; `Toolbox._draw`): hizo falta cuando José Adrián pidió una tabla de proyecciones y
+  Duma la escribió con barras.
 - **Tiempo objetivo por inscrito (subido el 9-oct; el API en `main` por el PR #40).** Es `events_groups.tiempo_objetivo` (texto `HH:MM:SS`, opcional; lo manda la app
   al inscribirse, `PUT /v1/eventos`, `routers/reports.py`). La ruta de consulta del asistente solo trae
   `time_result` (`routers/assistant.py`, ~línea 925): agregar `goal` ahí (**API primero**) y a `_row`
