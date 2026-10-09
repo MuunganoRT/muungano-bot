@@ -154,6 +154,10 @@ def _extras(a: dict[str, Any]) -> list[str]:
     parts = []
     if "covered_until" in a:
         parts.append(f"cubierto hasta {_day_year(a['covered_until'])}" if a["covered_until"] else "sin membresía")
+    if a.get("member_since"):
+        parts.append(f"alta {_day_year(a['member_since'])}")
+    if a.get("paid_streak"):
+        parts.append(f"{a['paid_streak']['months']} meses seguidos pagados (desde {_day_year(a['paid_streak']['since'])})")
     receipt = a.get("receipt")
     if receipt:
         kind = "beneficio" if receipt.get("benefit") else "comprobante"
@@ -231,6 +235,8 @@ def matches_csv(found: dict[str, Any]) -> bytes:
         header += ["Último pago", "Monto"]
     extras = [
         ("Cubierto hasta", "covered_until", lambda a: a.get("covered_until") or ""),
+        ("Alta", "member_since", lambda a: a.get("member_since") or ""),
+        ("Meses seguidos pagados", "paid_streak", lambda a: (a.get("paid_streak") or {}).get("months", "")),
         ("Comprobante", "receipt", lambda a: RECEIPT_STATUS.get(a["receipt"]["status"], "") if a.get("receipt") else ""),
         ("Beneficio", "receipt", lambda a: ("sí" if a["receipt"].get("benefit") else "no") if a.get("receipt") else ""),
         ("Nivel", "watch", lambda a: a.get("level") if a.get("level") is not None else ""),

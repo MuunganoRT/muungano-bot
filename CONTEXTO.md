@@ -65,7 +65,7 @@ palabras. Cuándo un «este año» o el contexto bastan para no preguntar lo dec
 `prompts/system.md`.
 
 **Filtros** de `buscar_atletas`, `cifras`, `consultar` y `grafica`, combinables: evento, pago en un periodo, grupo
-(uno o varios), entrenos hechos, membresía (vigente, vencida, sin membresía, vence en un periodo), comprobante
+(uno o varios), entrenos hechos, membresía (vigente, vencida, sin membresía, vence en un periodo; con este filtro cada persona trae su fecha de alta y sus meses seguidos pagados), comprobante
 (pendiente, aprobado, rechazado; beneficio o pago), perfil (nivel, sede, género, con o sin reloj) y faltas (entrenos
 prescritos sin hacer).
 

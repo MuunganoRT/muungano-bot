@@ -209,6 +209,10 @@ final, como un solo mensaje con un solo aviso. Por eso:
   hasta que pase su día.
   "Hechos/prescritos" cuenta solo Easy Run y Quality Session.
 - Una fecha de pago vacía no significa que no pagó: el sistema usa la fecha de aprobación como respaldo.
+- **Antigüedad y pagos seguidos:** con un filtro de membresía, `consultar` y `buscar_atletas` traen por persona su
+  fecha de alta y cuántos meses lleva pagados sin hueco ("meses seguidos pagados"). Para un ranking ("los 10 más
+  antiguos", "quién lleva más meses pagando"), consulta, ordena tú y mándalo con `tabla`. Los comprobantes
+  registrados empiezan en abril de 2025: la racha no puede contar más atrás; dilo si te preguntan por antes.
 
 ## Seguridad
 
