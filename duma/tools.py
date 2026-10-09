@@ -387,13 +387,44 @@ SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "catalogo",
         "description": (
-            "Te devuelve, solo a ti, los nombres reales de todos los grupos (con cuántos miembros tiene cada uno) y de "
-            "los eventos más recientes (con su fecha). Nada sale al chat y no trae datos de nadie. Úsala ANTES de "
-            "filtrar por un grupo o un evento cuyo nombre exacto no hayas visto ya en esta conversación, para saber a "
-            "cuál o cuáles se refiere el administrador. Los filtros comparan letras: «maratón» no encuentra «42k MTY "
-            "3:45+»."
+            "Busca qué existe, solo para ti: nada sale al chat y no trae datos de nadie. Pide el listado del tema del "
+            "que habla el administrador y solo ese. `eventos`: carreras de cualquier año, con fecha, si ya pasó, "
+            "inscritos y cuántos tienen resultado. `grupos`: grupos con sus miembros. `convenios`: empresas con "
+            "beneficio y código. `calendario`: entrenos que los coaches pusieron en el calendario, por título o tipo, "
+            "con cuántos atletas lo tienen. `texto` acota por palabras sueltas, sin importar acentos ni orden: busca "
+            "por lo que distingue (el lugar, la empresa, «cuestas»), no por palabras genéricas («maratón», «carrera»). "
+            "Úsala ANTES de filtrar por un grupo o un evento cuyo nombre exacto no hayas visto ya en esta "
+            "conversación, para saber a cuál o cuáles se refiere y decidir si hace falta preguntar. Sin `tipo` "
+            "devuelve todos los grupos y los eventos más recientes."
         ),
-        "input_schema": {"type": "object", "properties": {}},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tipo": {"type": "string", "enum": ["eventos", "grupos", "convenios", "calendario"]},
+                "texto": {"type": "string", "description": "Palabras a buscar, mínimo 2 letras. Sin él, el listado completo."},
+                "desde": {"type": "string", "description": "Solo `calendario`: YYYY-MM-DD. Sin fechas, 30 días atrás y 30 adelante."},
+                "hasta": {"type": "string", "description": "Solo `calendario`: YYYY-MM-DD."},
+            },
+        },
+    },
+    {
+        "name": "anotar_faltante",
+        "description": (
+            "Deja anotado, para quien mantiene a Duma, algo que el administrador pidió y que ninguna de tus "
+            "herramientas pudo traer. Llámala SIEMPRE antes de decirle que no puedes consultar algo, después de "
+            "haber intentado con las que sí tienes. Nada sale al chat. No la uses para un dato que existe pero viene "
+            "vacío, ni para lo que está fuera de Muungano."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pedido": {
+                    "type": "string",
+                    "description": "Qué dato pidió, en una frase y sin nombres de personas. Ejemplo: «teléfono de contacto de un atleta».",
+                },
+            },
+            "required": ["pedido"],
+        },
     },
     {
         "name": "preguntar",
@@ -967,6 +998,13 @@ WORKOUT_COLUMNS = [
     ("Fecha", 1.1, "left"), ("Tipo", 2.0, "left"), ("Km", 1.0, "right"), ("Tiempo", 1.3, "right"),
     ("Ritmo", 1.0, "right"), ("FC", 0.8, "right"), ("Score", 1.0, "right"),
 ]
+# Which listing answers each kind of thing, and the key its rows come under.
+LOOKUPS = {
+    "eventos": ("/assistant/events", "events"),
+    "grupos": ("/assistant/groups", "groups"),
+    "convenios": ("/assistant/benefits", "benefits"),
+    "calendario": ("/assistant/calendar", "workouts"),
+}
 WHICH_EVENT = "Ese nombre coincide con varios eventos. ¿Cuál quieres?"
 ASKED_WHICH_EVENT = (
     "Ese nombre coincide con varios eventos: {events}. No mandé la consulta; ya le pregunté cuál con botones. No hagas "
@@ -1415,6 +1453,7 @@ class Toolbox:
             "buscar_atletas": self._query,
             "cifras": self._aggregate,
             "catalogo": self._catalog,
+            "anotar_faltante": self._missing,
             "preguntar": self._ask,
             "grafica": lambda a, u: self._chart(a, u, names),
             "consultar": lambda a, u: self._analyze(a, u, names),
@@ -1617,7 +1656,61 @@ class Toolbox:
             buttons=choice_buttons(labels, telegram_user_id),
         )
 
+    async def _missing(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        # The audit log already records every tool call with its arguments: that line is the note.
+        _text(args, "pedido", minimum=5, maximum=200)
+        return ToolResult(None, "Anotado. Ahora dile en una línea qué no pudiste traer y qué sí tienes parecido.")
+
+    async def _lookup(self, kind: str, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        """One kind of thing by name, for the model to see what exists before it decides or asks."""
+        text = _text(args, "texto") if args.get("texto") else None
+        params: dict[str, Any] = {"q": text} if text else {}
+        path, key = LOOKUPS[kind]
+        if kind == "calendario":
+            for ours, theirs in (("desde", "from"), ("hasta", "to")):
+                if _iso_date(args, ours):
+                    params[theirs] = _iso_date(args, ours)
+        try:
+            found = await self._api.get(path, telegram_user_id=telegram_user_id, params=params or None)
+        except ApiError as exc:
+            # An API one release behind has no listings yet: the old catalogue still names groups and recent events.
+            if exc.status != 404 or kind not in ("eventos", "grupos"):
+                raise
+            return await self._catalog({}, telegram_user_id)
+        rows, total = found[key], found["total"]
+        if not rows:
+            about = f" con «{text}»" if text else ""
+            return ToolResult(None, f"Ningún resultado en {kind}{about}. Prueba con otra palabra o sin `texto` antes de decir que no existe.")
+        if kind == "eventos":
+            lines = [
+                f"{e['name']} ({e['date']}, {'ya pasó' if e['past'] else 'por venir'}, {e['entrants']} inscritos, "
+                f"{e['with_result']} con resultado)"
+                for e in rows
+            ]
+        elif kind == "grupos":
+            lines = [f"{g['name']} ({g['members']} miembros)" for g in rows]
+        elif kind == "convenios":
+            lines = [
+                f"{b['company']}: {b['benefit']}"
+                + (f" · código {b['code']}" if b.get("code") else "")
+                + (f" · {_clip(' '.join(b['description'].split()), 160)}" if b.get("description") else "")
+                for b in rows
+            ]
+        else:
+            lines = [f"{w['date']} | {w['type']} | {_clip(w['title'], 80) or 'sin título'} | {w['athletes']} atletas" for w in rows]
+        head = f"{total} en {kind}"
+        if kind == "calendario":
+            head += f" del {found['period']['from']} al {found['period']['to']}"
+        if total > len(rows):
+            head += f" (van {len(rows)}; acota con `texto`)"
+        return ToolResult(None, head + ":\n" + "\n".join(lines))
+
     async def _catalog(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
+        kind = args.get("tipo")
+        if kind is not None:
+            if kind not in LOOKUPS:
+                raise ValueError("`tipo` must be eventos, grupos, convenios or calendario")
+            return await self._lookup(kind, args, telegram_user_id)
         found = await self._api.get("/assistant/catalog", telegram_user_id=telegram_user_id)
         groups = "; ".join(f"{g['name']} ({g['members']})" for g in found["groups"]) or "ninguno"
         events = "; ".join(f"{e['name']} ({e['date']})" for e in found["events"]) or "ninguno"

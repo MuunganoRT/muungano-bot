@@ -92,6 +92,11 @@ en [docs/duma-como-te-lo-presento.docx](docs/duma-como-te-lo-presento.docx)):**
 - **Score del día en curso (escrito el 9-oct, sin subir; el API va primero):** un entreno prescrito para hoy o
   después y aún sin hacer es `pending` y no cuenta en `prescribed` ni en el score (`_settled`,
   `muungano-api/routers/assistant.py`: resumen, totales y serie). El bot lo muestra como «por hacer».
+- **Listados por tema (escrito el 9-oct; API `dev`, bot `main`):** Alex no quiere datos planchados en el prompt ni
+  un buscador de todo, y sí que Duma encuentre solo a qué se refiere el admin. `catalogo` acepta `tipo` (eventos,
+  grupos, convenios, calendario) y `texto`; las rutas viven en `muungano-api/routers/assistant_lookup.py`. Antes de
+  decir que no puede, Duma llama a `anotar_faltante`: revisar esos pedidos en `state/audit.log` dice qué
+  herramienta falta. La consulta libre por SQL se propuso y no se tomó.
 - **Sin escribir:** el formato de la proyección de carrera (rango, imagen de tiradas largas y dos líneas) y el
   resumen de ciclo en una sola imagen (cumplimiento, km y ritmo, objetivo contra resultado).
 

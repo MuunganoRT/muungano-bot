@@ -18,6 +18,7 @@ import httpx
 ALLOWED = (
     ("GET", re.compile(r"^/assistant/athletes$")),
     ("GET", re.compile(r"^/assistant/catalog$")),
+    ("GET", re.compile(r"^/assistant/(events|groups|benefits|calendar)$")),
     ("GET", re.compile(r"^/assistant/athletes/\d+/summary$")),
     ("GET", re.compile(r"^/assistant/athletes/\d+/workouts$")),
     ("GET", re.compile(r"^/assistant/athletes/\d+/workouts/\d+/laps$")),

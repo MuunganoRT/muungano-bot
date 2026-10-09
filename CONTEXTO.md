@@ -53,7 +53,9 @@ Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/
 | `cifras` | totales de un conjunto: personas, pagos, entrenos, km, score |
 | `consultar` | una fila por persona para comparar o razonar (tope de 60); con filtro de evento, el tiempo objetivo que capturó al inscribirse, su resultado y la diferencia |
 | `grafica` | por semana, ranking o dispersión del score, como imagen |
-| `catalogo`, `preguntar` | nombres de grupos y eventos; una pregunta al admin con botones |
+| `catalogo` | qué existe, por tema y solo para el modelo: `eventos` de cualquier año (fecha, inscritos, con resultado), `grupos`, `convenios` y `calendario` (entrenos que pusieron los coaches, por título o tipo), con texto para acotar |
+| `preguntar` | una pregunta al admin con botones |
+| `anotar_faltante` | deja en `state/audit.log` lo que pidieron y ninguna herramienta pudo traer (evento `tool`, con el pedido) |
 
 Si el nombre de un evento o de un grupo coincide con más de los que se pidieron (otro año, otra distancia, «42k
 MTY» con sus varios ritmos), la consulta no sale: el admin recibe la pregunta con un botón por opción y «Ambos» o
@@ -66,8 +68,8 @@ palabras. Cuándo un «este año» o el contexto bastan para no preguntar lo dec
 (pendiente, aprobado, rechazado; beneficio o pago), perfil (nivel, sede, género, con o sin reloj) y faltas (entrenos
 prescritos sin hacer).
 
-No tiene: correo, teléfono ni contacto de nadie; el título y la descripción que el coach escribe en un entreno;
-convenios. `errores_garmin` no cubre a quien no tiene reloj vinculado, y `avisos_enviados` no trae el resumen
+No tiene: correo, teléfono ni contacto de nadie; la descripción que el coach escribe en un entreno (el título sí,
+por `catalogo`). `errores_garmin` no cubre a quien no tiene reloj vinculado, y `avisos_enviados` no trae el resumen
 semanal ni la cuenta regresiva de eventos, que son automáticos.
 
 ## Qué puede escribir
@@ -169,4 +171,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (304 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (307 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.

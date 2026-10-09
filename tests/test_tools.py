@@ -752,6 +752,68 @@ async def test_ranking_and_spread_refuse_what_they_cannot_draw_before_calling_th
     assert api.calls == []
 
 
+async def test_each_kind_of_thing_has_its_own_listing_and_only_the_model_sees_it():
+    class Api(FakeApi):
+        answers = {
+            "/assistant/events": {"total": 2, "events": [
+                {"name": "42k Berlin 2026", "date": "2026-09-27", "past": True, "entrants": 7, "with_result": 1},
+                {"name": "42k Berlin 2025", "date": "2025-09-21", "past": True, "entrants": 12, "with_result": 3},
+            ]},
+            "/assistant/groups": {"total": 1, "groups": [{"name": "Berlin 4:00hr", "members": 4}]},
+            "/assistant/benefits": {"total": 1, "benefits": [{"company": "Innovasport", "benefit": "15% en tenis", "code": "MUU15", "description": None}]},
+            "/assistant/calendar": {"total": 1, "period": {"from": "2026-09-01", "to": "2026-09-30"}, "workouts": [
+                {"date": "2026-09-20", "type": "Quality Session", "title": "Cuestas largas", "athletes": 12},
+            ]},
+        }
+
+        async def get(self, path, *, telegram_user_id, params=None):
+            if path in self.answers:
+                self.calls.append((path, params, telegram_user_id))
+                return {"success": True, **self.answers[path]}
+            return await super().get(path, telegram_user_id=telegram_user_id, params=params)
+
+    api = Api([])
+    box = Toolbox(api)
+    events = await box.run("catalogo", {"tipo": "eventos", "texto": "Berlín"}, 956)
+    assert api.calls[-1] == ("/assistant/events", {"q": "Berlín"}, 956) and events.direct_text is None
+    assert events.to_model.splitlines() == [
+        "2 en eventos:",
+        "42k Berlin 2026 (2026-09-27, ya pasó, 7 inscritos, 1 con resultado)",
+        "42k Berlin 2025 (2025-09-21, ya pasó, 12 inscritos, 3 con resultado)",
+    ]
+    assert (await box.run("catalogo", {"tipo": "grupos"}, 956)).to_model == "1 en grupos:\nBerlin 4:00hr (4 miembros)"
+    assert api.calls[-1] == ("/assistant/groups", None, 956)
+    assert (await box.run("catalogo", {"tipo": "convenios", "texto": "tenis"}, 956)).to_model.endswith("Innovasport: 15% en tenis · código MUU15")
+    calendar = await box.run("catalogo", {"tipo": "calendario", "texto": "cuestas", "desde": "2026-09-01", "hasta": "2026-09-30"}, 956)
+    assert api.calls[-1][1] == {"q": "cuestas", "from": "2026-09-01", "to": "2026-09-30"}
+    assert calendar.to_model == "1 en calendario del 2026-09-01 al 2026-09-30:\n2026-09-20 | Quality Session | Cuestas largas | 12 atletas"
+
+    api.answers = {**api.answers, "/assistant/events": {"total": 0, "events": []}}
+    nothing = await box.run("catalogo", {"tipo": "eventos", "texto": "zzz"}, 956)
+    assert nothing.direct_text is None and nothing.to_model.startswith("Ningún resultado en eventos con «zzz».")
+    assert (await box.run("catalogo", {"tipo": "pagos"}, 956)).is_error
+
+
+async def test_an_api_without_the_listings_yet_still_names_groups_and_recent_events():
+    from duma.api_client import ApiError
+
+    class Old(FakeApi):
+        async def get(self, path, *, telegram_user_id, params=None):
+            if path in ("/assistant/events", "/assistant/benefits"):
+                raise ApiError(404, "Not Found")
+            return await super().get(path, telegram_user_id=telegram_user_id, params=params)
+
+    box = Toolbox(Old([]))
+    assert (await box.run("catalogo", {"tipo": "eventos", "texto": "chicago"}, 956)).to_model.startswith("Grupos (miembros): ")
+    assert (await box.run("catalogo", {"tipo": "convenios"}, 956)).is_error
+
+
+async def test_what_could_not_be_fetched_is_noted_without_a_word_in_the_chat():
+    r = await Toolbox(FakeApi([])).run("anotar_faltante", {"pedido": "teléfono de contacto de un atleta"}, 956)
+    assert r.direct_text is None and not r.is_error and r.to_model.startswith("Anotado.")
+    assert (await Toolbox(FakeApi([])).run("anotar_faltante", {}, 956)).is_error
+
+
 async def test_the_catalogue_goes_to_the_model_only_with_names_and_head_counts():
     api = FakeApi([])
     r = await Toolbox(api).run("catalogo", {}, 956)
