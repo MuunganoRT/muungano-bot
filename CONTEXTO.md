@@ -3,7 +3,7 @@
 Estado de lo **implementado y desplegado**. Lo que falta y las decisiones de diseño viven en [PLAN.md](PLAN.md).
 Se actualiza en cada commit: si el código cambia lo que dice este archivo, el mismo commit lo corrige.
 
-Última actualización: 2026-10-08.
+Última actualización: 2026-10-09.
 
 ## Qué es
 
@@ -49,7 +49,7 @@ Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/
 | `avisos_enviados` | avisos mandados por correo o push, con cuántos aceptó cada canal |
 | `buscar_atletas` | lista de quienes cumplen unos filtros |
 | `cifras` | totales de un conjunto: personas, pagos, entrenos, km, score |
-| `consultar` | una fila por persona para comparar o razonar (tope de 60) |
+| `consultar` | una fila por persona para comparar o razonar (tope de 60); con filtro de evento, el tiempo objetivo que capturó al inscribirse, su resultado y la diferencia |
 | `grafica` | por semana, ranking o dispersión del score, como imagen |
 | `catalogo`, `preguntar` | nombres de grupos y eventos; una pregunta al admin con botones |
 
@@ -157,4 +157,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (294 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (296 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.

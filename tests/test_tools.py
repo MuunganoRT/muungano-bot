@@ -496,6 +496,25 @@ async def test_the_model_is_told_to_check_the_saved_rules_before_proposing(tmp_p
     assert "contradice" in description and "reemplaza" in description and "cómo interpretas" in description
 
 
+async def test_an_event_row_tells_the_model_the_goal_the_result_and_what_nobody_recorded():
+    from duma.pseudonyms import Pseudonyms
+
+    def entered(goal, result):
+        return [{"event": "42k Berlin", "date": "2026-09-27", "time_result": result, "goal": goal}]
+
+    people = [
+        {**ANA_P, "role": "runner", "events": entered("03:00:00", 10783)},
+        {"id": 12, "name": "Luis Coach", "role": "coach", "group": None, "events": entered(None, None)},
+        {"id": 13, "name": "Eva Ruiz", "role": "runner", "group": None, "events": entered("ganarle a Luis", 14400)},
+    ]
+    r = await Toolbox(FakeApi(people)).run("consultar", {"filtros": [{"tipo": "evento", "nombre": "berlin"}]}, 956, Pseudonyms())
+    rows = r.to_model.splitlines()[1:]
+    assert rows[0].endswith("evento 42k Berlin (2026-09-27) objetivo 3:00:00, resultado 2:59:43, diferencia -0:00:17")
+    assert rows[1].endswith("evento 42k Berlin (2026-09-27) sin objetivo capturado, sin resultado registrado")
+    assert rows[2].endswith("evento 42k Berlin (2026-09-27) sin objetivo capturado, resultado 4:00:00")
+    assert "ganarle" not in r.to_model
+
+
 async def test_analysis_rows_reach_the_model_with_codes_and_never_a_name():
     from duma.pseudonyms import Pseudonyms
 

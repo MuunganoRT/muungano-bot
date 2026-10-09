@@ -88,6 +88,25 @@ def test_matches_carry_the_columns_their_filters_were_about():
     assert render_matches({"total": 0, "athletes": []}) == "Nadie cumple esos filtros."
 
 
+def test_a_goal_shows_next_to_the_result_in_the_list_and_in_the_csv():
+    from duma.render import matches_csv, render_matches
+
+    found = {
+        "total": 2,
+        "athletes": [
+            {"name": "Ana Peña", "group": "Berlin 3:00hr", "events": [{"event": "42k Berlin", "date": "2026-09-27", "time_result": 10783, "goal": "3:00:00"}]},
+            {"name": "Beto Ruiz", "group": "Berlin 4:00hr", "events": [{"event": "42k Berlin", "date": "2026-09-27", "time_result": None, "goal": None}]},
+        ],
+    }
+    assert render_matches(found).splitlines()[1:] == [
+        "- Ana Peña (Berlin 3:00hr) · 42k Berlin (27 sep 2026) objetivo 3:00:00 resultado 2:59:43 (-0:00:17)",
+        "- Beto Ruiz (Berlin 4:00hr) · 42k Berlin (27 sep 2026)",
+    ]
+    header, ana, beto = matches_csv(found).decode("utf-8-sig").splitlines()
+    assert header.endswith("Evento,Fecha del evento,Tiempo,Objetivo,Diferencia")
+    assert ana.endswith("42k Berlin,2026-09-27,2:59:43,3:00:00,0:00:17 menos") and beto.endswith("42k Berlin,2026-09-27,,,")
+
+
 def test_the_csv_adds_only_the_columns_the_filters_brought_and_defuses_formulas():
     from duma.render import matches_csv
 

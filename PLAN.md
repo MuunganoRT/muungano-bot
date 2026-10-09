@@ -60,6 +60,33 @@ haga las consultas previas que necesite y, si queda duda, pregunte. Es regla gen
 
 **Tablas como imagen, escrito el 2026-10-07 (sin subir):** la primera respuesta real de `entrenos_atleta` salió larga y llena de cifras. Ahora las dos herramientas mandan al chat una tabla dibujada por `charts.table_png` (fondo negro, las manchas del icono en la esquina, texto blanco; hasta 40 filas) y el modelo recibe las mismas filas con la instrucción de no repetirlas. El prompt pide dos o tres líneas y, en una estimación, el rango y una razón. El API (`dev`) agrega `athlete` a las dos rutas y `workout` (totales) a la de vueltas, para el título de la imagen; el bot dibuja la tabla aunque no vengan.
 
+**Auditoría de chats del 2026-10-09 (plan, sin escribir; espera visto bueno de Alex y las respuestas de José Adrián
+en [docs/duma-como-te-lo-presento.docx](docs/duma-como-te-lo-presento.docx)):**
+- **Una respuesta por pregunta, y la arma el modelo.** Hoy cada herramienta manda su mensaje al momento
+  (`Agent.run`, `duma/agent.py`): «objetivos de Berlin» fueron 9 mensajes con 9 avisos. Cambio: las herramientas
+  le devuelven filas al modelo (con códigos `ATLETA_NN`) y no mandan nada; el modelo cierra con una herramienta
+  nueva, `presentar` (título, columnas, filas, y si es tabla, lista o archivo), que sale como **una** imagen o
+  archivo con su texto de pie. Lo que escribió una persona sigue sin pasar por el modelo: va como columna que
+  el bot rellena. Todo lo que no sea el último mensaje del turno sale con `disable_notification`.
+- **Tiempo objetivo por inscrito (subido el 9-oct; el API en `main` por el PR #40).** Es `events_groups.tiempo_objetivo` (texto `HH:MM:SS`, opcional; lo manda la app
+  al inscribirse, `PUT /v1/eventos`, `routers/reports.py`). La ruta de consulta del asistente solo trae
+  `time_result` (`routers/assistant.py`, ~línea 925): agregar `goal` ahí (**API primero**) y a `_row`
+  (`duma/tools.py`). Medido en producción el 9-oct: Berlin 0 de 7 con objetivo, Chicago 10 de 15, Monterrey 14 de 19.
+- **«No está capturado» no es «no lo puedo ver» (subido el 9-oct).** Regla en `prompts/system.md`; y no pedir `perfil_atleta` persona
+  por persona para armar una tabla.
+- **Abrir temas.** Alias `/run` y `/runn`; el resto según lo que elija José Adrián (pregunta 1 del documento). La
+  recomendada: `/ruun` sin texto abre el tema y lo renombra con la primera pregunta (falta `editForumTopic` en
+  `duma/telegram_api.py`).
+- **Respuestas de José Adrián (9-oct):** aceptó las recomendaciones del documento. Al abrir el tema con `/ruun`,
+  Duma saluda con «Sí, dime», no con «¿Qué necesitas?».
+- **Editar un evento en la consola borraba objetivos y resultados (arreglado el 9-oct, API `9778c17`).** `update_event`
+  (`muungano-api/routers/roster.py`, `PUT /v2/events`) borra todas las inscripciones y las reinserta solo con
+  `id_event` e `id_user`; el espejo (`_set_event_members`, `services/legacy.py`) hace lo mismo en MySQL. Las 7 de
+  Berlin 2026 tienen `date_created` 2026-08-11 17:09:03, idénticas, y ninguna tiene objetivo. Arreglo: borrar solo
+  a quien salió de la lista e insertar solo a quien entró.
+- **Nombre dentro de un grupo o evento** en `buscar_atleta`, para que «Ari de Berlin» no liste 39 personas.
+- **Score del día en curso:** pendiente de la respuesta 2 del documento; el cálculo vive en el API.
+
 **Lo siguiente, en orden:**
 1. El menú de comandos al escribir `/` le aparece a Alex en el iPhone y no en la Mac. Comprobado en producción con
    `getMyCommands`: los seis comandos están en el alcance `chat` del grupo y en ningún otro. Es el cliente de Mac;

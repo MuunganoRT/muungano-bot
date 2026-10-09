@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import date
 from typing import Any, Optional
 
@@ -116,6 +117,26 @@ def _race_time(value: Any) -> str:
     return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
+def _goal_seconds(value: Any) -> Optional[int]:
+    """The goal an athlete typed when entering a race, in seconds. None unless it reads as a time.
+
+    The column is free text of up to 15 characters: only a clock time may reach the model.
+    """
+    match = re.fullmatch(r"(\d{1,2}):([0-5]\d)(?::([0-5]\d))?", str(value or "").strip())
+    if not match:
+        return None
+    hours, minutes, seconds = (int(part or 0) for part in match.groups())
+    return (hours * 3600 + minutes * 60 + seconds) or None
+
+
+def _gap(goal: int, result: Any, words: bool = False) -> str:
+    """Result minus goal, signed: `-0:02:45` is under the goal. In words for a spreadsheet, where a leading sign is a formula."""
+    delta = int(result) - goal
+    if words:
+        return f"{_race_time(abs(delta))} {'menos' if delta < 0 else 'más'}"
+    return ("-" if delta < 0 else "+") + _race_time(abs(delta))
+
+
 def _money(amount: float) -> str:
     return f"${amount:,.0f} MXN" if abs(amount - round(amount)) < 0.005 else f"${amount:,.2f} MXN"
 
@@ -153,8 +174,13 @@ def render_matches(found: dict[str, Any]) -> str:
         parts = [_person(a)]
         for e in a.get("events", []):
             entry = f"{e['event']} ({_day_year(e['date'])})"
+            goal = _goal_seconds(e.get("goal"))
+            if goal:
+                entry += f" objetivo {_race_time(goal)}"
             if e.get("time_result"):
-                entry += f" {_race_time(e['time_result'])}"
+                entry += f" {'resultado ' if goal else ''}{_race_time(e['time_result'])}"
+                if goal:
+                    entry += f" ({_gap(goal, e['time_result'])})"
             parts.append(entry)
         payment = a.get("last_payment")
         if payment:
@@ -189,9 +215,13 @@ def matches_csv(found: dict[str, Any]) -> bytes:
     with_events = any(a.get("events") for a in athletes)
     with_payment = any(a.get("last_payment") for a in athletes)
 
+    with_goals = any(_goal_seconds(e.get("goal")) for a in athletes for e in a.get("events") or [])
+
     header = ["Nombre", "Rol", "Grupo", "Estado"]
     if with_events:
         header += ["Evento", "Fecha del evento", "Tiempo"]
+    if with_goals:
+        header += ["Objetivo", "Diferencia"]
     if with_payment:
         header += ["Último pago", "Monto"]
     extras = [
@@ -218,6 +248,12 @@ def matches_csv(found: dict[str, Any]) -> bytes:
                 "; ".join(e["date"] for e in events),
                 "; ".join(_race_time(e.get("time_result")) for e in events),
             ]
+            if with_goals:
+                goals = [_goal_seconds(e.get("goal")) for e in events]
+                row += [
+                    "; ".join(_race_time(g) for g in goals),
+                    "; ".join(_gap(g, e["time_result"], words=True) if g and e.get("time_result") else "" for g, e in zip(goals, events)),
+                ]
         if with_payment:
             payment = a.get("last_payment") or {}
             row += [payment.get("date") or "", "" if payment.get("amount") is None else payment["amount"]]

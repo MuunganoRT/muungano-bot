@@ -34,7 +34,7 @@ from duma.api_client import ApiError, MuunganoApi
 from duma.confirmations import Confirmations
 from duma.preferences import PreferenceError, Preferences, clean
 from duma.pseudonyms import Pseudonyms
-from duma.render import RECEIPT_STATUS, _day, _day_year, _extras, _money, _num, _period, _race_time, matches_csv, render_candidates, render_matches, render_summary, table_csv
+from duma.render import RECEIPT_STATUS, _day, _day_year, _extras, _gap, _goal_seconds, _money, _num, _period, _race_time, matches_csv, render_candidates, render_matches, render_summary, table_csv
 
 log = logging.getLogger(__name__)
 
@@ -900,6 +900,13 @@ def _row(code: str, person: dict[str, Any], summary: Optional[dict[str, Any]]) -
     parts.append("activo" if person.get("active", True) else "inactivo")
     for e in person.get("events", []):
         result = f" tiempo {_race_time(e['time_result'])}" if e.get("time_result") else ""
+        if "goal" in e:
+            # Said in words, so a missing figure reads as "nobody recorded it" and not as "I cannot see it".
+            goal = _goal_seconds(e["goal"])
+            result = f" objetivo {_race_time(goal)}" if goal else " sin objetivo capturado"
+            result += f", resultado {_race_time(e['time_result'])}" if e.get("time_result") else ", sin resultado registrado"
+            if goal and e.get("time_result"):
+                result += f", diferencia {_gap(goal, e['time_result'])}"
         parts.append(f"evento {e['event']} ({e['date']}){result}")
     payment = person.get("last_payment")
     if payment:
