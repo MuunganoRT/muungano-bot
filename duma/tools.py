@@ -1801,10 +1801,11 @@ class Toolbox:
 
     async def _search_within(self, args: dict[str, Any], telegram_user_id: int, names: Pseudonyms) -> ToolResult:
         """A name among those a filter matches: "Ari, la de Berlin". A few hits go to the model as codes, not to the chat."""
-        wanted = _fold(_text(args, "texto"))
+        # Word by word, as the search without filters matches: "Diego Romero" is Diego Daniel Romero Kalifa.
+        wanted = _fold(_text(args, "texto")).split()
         body = {"filters": _filters(args), "member_status": _member_status(args), "limit": QUERY_LIMIT}
         found = await self._filtered("/assistant/athletes/query", telegram_user_id, body)
-        hits = [a for a in found["athletes"] if wanted in _fold(a["name"])]
+        hits = [a for a in found["athletes"] if all(word in _fold(a["name"]) for word in wanted)]
         if not hits:
             return ToolResult(None, f"Nadie con ese nombre entre las {found['total']} persona(s) de esos filtros.{_understood(found)}")
         if len(hits) > MAX_CHOICES:

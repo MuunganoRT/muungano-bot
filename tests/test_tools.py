@@ -1548,3 +1548,14 @@ def test_no_tool_of_the_model_can_reach_a_route_that_writes():
     from duma import tools
 
     assert ".write(" not in inspect.getsource(tools)
+
+
+async def test_a_name_among_a_filter_is_matched_word_by_word():
+    from duma.pseudonyms import Pseudonyms
+
+    diego = {"id": 82, "name": "Diego Daniel Romero Kalifa", "group": None}
+    api, names = FakeApi([ANA_P, diego]), Pseudonyms()
+    args = {"texto": "Diego Romero", "filtros": [{"tipo": "evento", "nombre": "berlin"}]}
+    r = await Toolbox(api).run("buscar_atleta", args, 956, names)
+    assert r.to_model.startswith("1 coincidencia(s): ATLETA_01 (grupo ninguno).")
+    assert names.athlete_id("ATLETA_01") == 82
