@@ -811,6 +811,132 @@ Decisiones de la fase A: el filtro de perfil no filtra por edad (la fecha de nac
 el perfil da solo «unos N años» por el año). La meta del cuestionario y el motivo de rechazo son texto que escribió
 una persona: salen al chat y al CSV, nunca al modelo. Un beneficio pendiente no trae meses (los elige quien aprueba).
 
+### Consulta general y socio de beneficio (escrito el 2026-10-12, sin commit ni despliegue)
+
+**Estado.** Escrito y probado en local, en el working tree de los tres repos; Alex hace los commits.
+- `muungano-api` (`dev`): `routers/assistant_data.py` (`GET /assistant/schema`, `POST /assistant/data`) con las
+  tablas `atletas`, `comprobantes`, `inscripciones`, `entregas`, `avisos`, `grupos` y `convenios`, y entrenos, km
+  y score por persona en las listas de `atletas`; las cuatro situaciones de membresía en `routers/assistant.py`
+  (el filtro de membresía gana `grace` y cambia `expired` y `none`); `without_amount` cuenta también los montos en
+  0; columna `users.beneficio` (migración `a7d3e9c15b62`) y la regla de tarifa en `update_user`. 380 pruebas.
+- `muungano-bot` (`main`): herramienta `datos`, filtro `en_gracia`, instrucciones de cobranza. 325 pruebas.
+- `muungano-web` (`dev`): casilla «Beneficio» en el diálogo de tarifa de Atletas. Probada en el navegador contra el
+  API local: guarda, la tarifa queda en $0 y la lista dice «Beneficio»; al desmarcar vuelve la tarifa.
+- De punta a punta en local: `Toolbox.run("datos", …)` contra el API local con el seed.
+
+**Falta.**
+- Commit y push. El orden importa: primero el API (`deploy_dev.sh` y `deploy_main.sh` corren `alembic upgrade head`,
+  verificado en el servidor el 12-oct), luego el bot, que sin la ruta contesta error en `datos`.
+- **Espejo a MySQL (por platicar con Alex):** `beneficio` no se escribe en MySQL y la tarifa 0 que fuerza tampoco,
+  así que los builds ≤ 87 siguen viendo la tarifa anterior de ese socio.
+- **Planes en la app (escrito el 12-oct, solo `muungano-api`):** `payment_info` ofrece el beneficio solo al socio
+  marcado y no le manda planes de pago; `POST /v2/receipts` rechaza lo que no se ofreció. 380 pruebas en el API. La
+  app no se tocó (decisión de Alex, recién se publicó versión): el socio marcado ve «No pudimos cargar los planes»
+  encima de la tarjeta de beneficio, que sí funciona, y tiene que tocarla para seleccionarla. Para la siguiente
+  versión: ocultar ese texto y preseleccionar la tarjeta en `Subscription.js`. Hasta marcar a alguien, nadie ve la
+  tarjeta de beneficio.
+- Marcar en la consola a los socios de beneficio reales (hoy 15 activos con tarifa de $1, más los que tienen
+  $1,200); mientras tanto `usa_beneficio` los reconoce por la tarifa de 0 o 1.
+- Los km y el score no se pueden filtrar ni sumar dentro de la consulta (se calculan en Python): se listan, se
+  ordenan y llega su total. Si hace falta filtrar por ellos, habría que guardarlos calculados.
+- Probar a Duma en Telegram con el modelo real usando `datos`.
+
+
+**Por qué.** El 12-oct José Adrián pidió el monto pendiente de cobro y Duma no pudo: la tarifa (`users.rate`, la
+columna Tarifa de la consola) no sale por ninguna ruta `/assistant/*`. Es la tercera vez que se amplía el API por un
+campo. Se cambia el enfoque: una sola herramienta de consulta sobre un esquema publicado, para todo lo que no sea
+entrenos. Sustituye a la decisión «sin SQL libre» solo en esto: el modelo sigue sin escribir SQL, manda una consulta
+estructurada y el API arma el SQL.
+
+**Por qué no SQL crudo.** El usuario de Postgres en Cloudron no puede crear roles (sección 2), así que la base no
+puede imponer solo-lectura ni ocultar columnas; habría que confiar en analizar el SQL del modelo.
+
+**Contrato.** `POST /assistant/data` (API) y herramienta `datos` (bot). El modelo manda:
+
+| Campo | Qué es |
+|---|---|
+| `tabla` | una de la lista permitida |
+| `columnas` | columnas reales o calculadas del esquema |
+| `filtros` | columna, operador (`=`, `!=`, `<`, `<=`, `>`, `>=`, `entre`, `en`, `vacío`, `contiene`) y valor |
+| `personas` | opcional: los mismos `filtros` de `consultar` (`FILTERS_SCHEMA`), para acotar por evento, grupo, entrenos |
+| `agrupar`, `medidas` | columnas de agrupación y `cuenta`, `suma`, `promedio`, `min`, `max` sobre una columna o fórmula |
+| `formulas` | nombre y expresión aritmética (`+ - * /`, `coalesce`) sobre columnas; se analiza a un árbol, no se pega al SQL |
+| `orden`, `limite` | orden y tope de filas |
+| `salida` | `modelo` (solo totales y filas enmascaradas), `tabla` o `csv` al chat |
+
+El SQL se arma con SQLAlchemy Core desde la consulta validada: ningún texto del modelo llega al SQL (regla dura 2).
+Solo `SELECT`, con `statement_timeout` (el de `AGG_STATEMENT_TIMEOUT_MS`) y tope de filas.
+
+**Esquema publicado** (`GET /assistant/schema`, va en el prompt en caché): por tabla, cada columna con tipo, una
+línea de qué es y su clase.
+
+| Clase | Qué hace el modelo con ella | Ejemplos |
+|---|---|---|
+| abierta | la ve, filtra, agrupa y calcula | `rate`, descuentos, `meses_pagados`, `ultimo_pago`, `pagado`, `nivel`, `sede`, `genero`, `pais`, `estado`, alta, reloj, `monto`, `meses`, `precio_esperado`, fechas y estado del comprobante, grupo, evento, convenio |
+| calculada | igual, con la definición del API | `activo`, `membresia` (vigente / en_gracia / vencida / sin_membresia), `cubierto_hasta`, `fecha_pago` (`_paid_date`), `usa_beneficio`, `pendiente` |
+| variable | la pide para la salida o una plantilla; recibe `{columna}`, el script pone el valor en el chat o CSV | nombre (hoy `ATLETA_NN`), `email`, `telefono`, contacto de emergencia, `notas`, `comentario_ad`, metas escritas |
+| fuera | no existe para el modelo | `password`, `tokens`, `device_tokens`, `user_sessions`, `garmin_oauth_states`, `ip_location` |
+
+Tablas: `atletas`, `comprobantes`, `inscripciones` y `entregas` (cada una con las columnas de su persona, grupo
+incluido), y `avisos`, `grupos` y `convenios`, que no son de personas.
+**Entrenos, vueltas, score y plan quedan en las herramientas actuales.**
+
+**Reglas.**
+- Una columna `variable` no se puede filtrar, agrupar ni ordenar: filtrarla dejaría adivinar el valor por el conteo.
+- Las medidas dicen cuántas filas tenían el valor vacío y cuántas en cero, por separado (el 12 contra 13 del 12-oct
+  salió de un comprobante en $0 que `cifras` contó como «con monto» y `comprobantes` mostró sin monto).
+- Cada consulta queda entera en `state/audit.log`.
+
+**Pasos.**
+1. API: registro del esquema (tablas, columnas, clase, expresiones calculadas). Las calculadas reutilizan las
+   expresiones SQL que ya usa `_resolve` (`routers/assistant.py`); **verificar primero** que `vigente/vence/vencida`
+   de `services/membership.py` tiene la misma definición en SQL, y si no, unificarla ahí.
+2. API: validador de la consulta y constructor del `SELECT`; `GET /assistant/schema` y `POST /assistant/data`.
+   Pruebas: cada operador, columna fuera de lista, `variable` en filtro, fórmula inválida, tope y timeout.
+3. Bot: `datos` en `duma/tools.py`, ruta en `ALLOWED` (`duma/api_client.py`), relleno de variables y códigos al
+   entregar (`Toolbox._deliver`, `duma/pseudonyms.py`), esquema en el prompt, y en `prompts/system.md` cuándo usar
+   `datos` y cuándo las herramientas de entrenos.
+4. Corregir `without_amount` en `/assistant/aggregate` para que cuente vacíos y ceros igual que el listado.
+5. Repetir en local la conversación del 12-oct (ingreso, quién pagó, pendientes y monto por tarifa) contra el seed.
+6. `CONTEXTO.md` de `muungano-api` y `muungano-bot`. API por `dev` y PR a `main`; bot en `main`.
+7. Después, con uso real: retirar `cifras`, `buscar_atletas`, `consultar` y `catalogo` si `datos` las cubre.
+
+**Prueba de concepto (2026-10-12, Postgres local, fuera del repo; no queda código).** Un constructor de `SELECT`
+sobre `atletas` y `comprobantes`, reutilizando `_roster`, `_uncovered_from`, `_has_coverage` y `_paid_date`:
+- 4 consultas (ingreso y pagos, vencidos con suma de tarifa y adeudo, vencidos por tarifa, pagos sin monto) dieron
+  lo mismo que SQL escrito a mano; 10 consultas indebidas se rechazaron (`password`, tabla fuera de lista, variable
+  en filtro/agrupar/fórmula, inyección y funciones en fórmula, operador y límite); el modelo no recibió ningún nombre,
+  correo ni referencia.
+- Un agente en limpio, solo con la descripción de la herramienta, armó 8 consultas para 5 preguntas de cobranza: las
+  8 corrieron. La de kilómetros la declaró imposible, como se esperaba.
+- Lo que la prueba obliga a cambiar: decir en la descripción que una fórmula también se puede filtrar (para «pagó
+  menos de lo esperado» ordenó en vez de filtrar); validar el tipo de cada valor (mandó `"no"` a un sí/no y pasó solo
+  porque Postgres lo convierte); y `meses_adeudados × tarifa` infla el adeudo de quien lleva muchos meses vencido y
+  sigue «activo» (en local, hasta 8 meses), así que el adeudo necesita un tope o la regla del equipo.
+- El seed local llega al 7-oct con 18 comprobantes: sirve para la mecánica, no para repetir las cifras del 12-oct.
+
+**Huecos que quedan, a propósito o por decidir.**
+- **Adeudo (decidido, Alex 12-oct):** solo se debe un mes y solo durante la gracia (`GRACE_LAST_DAY = 10`,
+  `muungano-api/services/membership.py`). `membresia` vale `vigente`, `en_gracia` (la cobertura acabó el mes pasado
+  y hoy es día 10 o antes), `vencida` (la cobertura acabó el mes pasado y ya pasó la gracia: no debe nada; el equipo no le llama cancelada) o `sin_membresia` (venció antes del mes pasado, o nunca tuvo). La columna
+  `pendiente` es la tarifa si está `en_gracia` y no usa beneficio, y 0 en cualquier otro caso. `meses_adeudados` no va.
+- **Beneficios (decidido, Alex 12-oct):** tarifa de $0 o $1 significa que usa beneficio: columna calculada
+  `usa_beneficio`, que no suma a ingreso esperado ni a pendiente. Alex dice que también hay socios de beneficio con
+  tarifa de $1,200; esos no se distinguen hoy (en producción `payment_receipts` no tiene ningún `beneficio = true`)
+  y hay que corregirles la tarifa o marcarlos, que es dato del equipo.
+- **Probado con esta regla** en local (día 12: pendiente 0; día 8 simulado: 5 en gracia, $5,700) contra SQL a mano.
+  En producción, solo lectura, al 12-oct: 60 vigentes (14 de beneficio), 22 vencidas (cubiertas hasta el 30-sep), 8 sin membresía (6 cubiertas hasta el 31-ago y 2 que nunca tuvieron), pendiente $0.
+- **Cruces con entrenos:** «los que deben y no han corrido en dos semanas» sale acotando con `personas`, pero no se
+  puede calcular en una misma fórmula tarifa contra km o score.
+- **Texto libre** (`notas`, comentarios, metas): Duma puede sacarlo al chat, no leerlo ni buscar por su sentido.
+- **Edad:** `fecha_nacimiento` mezcla día/mes y mes/día; solo sale el año, como hoy.
+- **Datos sucios:** la herramienta los señala (vacíos, ceros, montos raros), no los corrige. Los 12 comprobantes de
+  octubre sin monto siguen sin sumar.
+- **Mensajes personalizados:** la plantilla con variables sirve para armar el texto; mandarlo a cada socio con su
+  valor necesita que `proponer_aviso` y el API acepten variables por destinatario. Va en otra fase.
+- **Decidido (Alex, 12-oct):** `email` y `telefono` salen al chat cuando un admin los pide; el modelo sigue viendo
+  solo la variable.
+
 ### Escrituras desde Telegram (fases 1 y 2 escritas el 2026-10-07)
 
 Reglas de todas (las de la sección 4, que ya están en código para las preferencias: `duma/confirmations.py`, tabla

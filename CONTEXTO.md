@@ -3,7 +3,7 @@
 Estado de lo **implementado y desplegado**. Lo que falta y las decisiones de diseño viven en [PLAN.md](PLAN.md).
 Se actualiza en cada commit: si el código cambia lo que dice este archivo, el mismo commit lo corrige.
 
-Última actualización: 2026-10-09.
+Última actualización: 2026-10-12.
 
 ## Qué es
 
@@ -35,7 +35,8 @@ aprobar o rechazar comprobantes, decidir solicitudes de ingreso y mandar avisos 
 
 ## Qué puede consultar
 
-Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/api_client.py`). No tiene SQL.
+Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/api_client.py`). No escribe SQL: con
+`datos` manda una consulta estructurada y el API arma el `SELECT`.
 
 | Herramienta | Contesta |
 |---|---|
@@ -51,6 +52,7 @@ Todo sale de las rutas `/assistant/*` del API (lista cerrada `ALLOWED` en `duma/
 | `avisos_enviados` | avisos mandados por correo o push, con cuántos aceptó cada canal |
 | `buscar_atletas` | lista de quienes cumplen unos filtros. Con solo un filtro de evento, la imagen «Registro a <carrera>»: atleta, grupo, tiempo objetivo, resultado y diferencia, en verde cuando el resultado iguala o mejora el objetivo |
 | `cifras` | totales de un conjunto: personas, pagos, entrenos, km, score |
+| `datos` | consulta general sobre `atletas`, `comprobantes`, `inscripciones`, `entregas` de avisos, `avisos`, `grupos` y `convenios`: el modelo elige columnas, filtros, agrupación, medidas (cuenta, suma, promedio, mínimo, máximo, vacíos, ceros) y fórmulas. Trae tarifa, si usa beneficio, situación de la membresía, lo pendiente de cobro, perfil, montos y fechas de comprobantes, eventos, y a quién le llegó cada aviso. En una lista de `atletas` suma entrenos prescritos y hechos, km y score de un periodo (hasta 60 personas y 92 días). Las filas salen al chat como tabla o CSV; los totales se quedan con el modelo |
 | `consultar` | una fila por persona para comparar o razonar (tope de 60); con filtro de evento, el tiempo objetivo que capturó al inscribirse, su resultado y la diferencia |
 | `grafica` | por semana, ranking o dispersión del score, como imagen |
 | `tabla` | una tabla que el modelo arma con sus propias columnas y filas (cálculos, proyecciones), dibujada como imagen o CSV; los códigos de las celdas salen como nombres |
@@ -65,12 +67,16 @@ palabras. Cuándo un «este año» o el contexto bastan para no preguntar lo dec
 `prompts/system.md`.
 
 **Filtros** de `buscar_atletas`, `cifras`, `consultar` y `grafica`, combinables: evento, pago en un periodo, grupo
-(uno o varios), entrenos hechos, membresía (vigente, vencida, sin membresía, vence en un periodo; con este filtro cada persona trae su fecha de alta y sus meses seguidos pagados), comprobante
+(uno o varios), entrenos hechos, membresía (vigente, en gracia, vencida, sin membresía, vence en un periodo; con este filtro cada persona trae su fecha de alta y sus meses seguidos pagados), comprobante
 (pendiente, aprobado, rechazado; beneficio o pago), perfil (nivel, sede, género, con o sin reloj) y faltas (entrenos
-prescritos sin hacer).
+prescritos sin hacer). `datos` los acepta en `personas`.
 
-No tiene: correo, teléfono ni contacto de nadie; la descripción que el coach escribe en un entreno (el título sí,
-por `catalogo`). `errores_garmin` no cubre a quien no tiene reloj vinculado, y `avisos_enviados` no trae el resumen
+Membresía: en gracia es quien venció el mes pasado y hoy es día 10 o antes, y es el único que debe (un mes: la
+columna `pendiente`); vencida, quien venció el mes pasado y ya pasó el día 10; sin membresía, quien venció antes o
+nunca tuvo. Quien usa beneficio (marcado en la consola, o con tarifa de 0 o 1) no cuenta como ingreso esperado.
+
+No tiene: vueltas ni plan dentro de `datos` (siguen en sus herramientas); la descripción que el coach
+escribe en un entreno (el título sí, por `catalogo`). `errores_garmin` no cubre a quien no tiene reloj vinculado, y `avisos_enviados` no trae el resumen
 semanal ni la cuenta regresiva de eventos, que son automáticos.
 
 ## Qué puede escribir
@@ -163,6 +169,9 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 - Lo que escribió una persona (meta del cuestionario, comentario de una solicitud, motivo de rechazo, referencia
   leída de un comprobante, asunto de un aviso enviado) sale al chat o al CSV, no al modelo. El texto de un aviso nuevo sí pasa por el modelo: se lo
   dicta el administrador.
+- Correo, teléfono, contacto de emergencia, notas del coach, referencia y motivo de rechazo son columnas variables
+  de `datos`: salen en la tabla o el CSV del chat cuando un admin las pide y el modelo ve `{email}` en su lugar
+  (`Toolbox._data`, `duma/tools.py`). No se pueden filtrar, agrupar, ordenar ni meter en una fórmula.
 - La foto de un comprobante va del API al chat sin pasar por el modelo.
 
 ## Sesiones y costo
@@ -176,4 +185,4 @@ También guarda **preferencias permanentes** del equipo (`duma/preferences.py`),
 
 ## Pruebas
 
-`.venv/bin/python -m pytest -q` (310 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.
+`.venv/bin/python -m pytest -q` (325 pruebas). El CI las corre y, si pasan, llama a `/deploy/bot`. No hay lint en CI.

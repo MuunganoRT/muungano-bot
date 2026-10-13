@@ -81,10 +81,12 @@ FILTERS_SCHEMA: dict[str, Any] = {
             },
             "situacion": {
                 "type": "string",
-                "enum": ["vigente", "vencida", "sin_membresia", "vence", "pendiente", "aprobado", "rechazado"],
+                "enum": ["vigente", "en_gracia", "vencida", "sin_membresia", "vence", "pendiente", "aprobado", "rechazado"],
                 "description": (
-                    "Para `membresia`: `vigente` (cubre hoy), `vencida`, `sin_membresia` (nunca tuvo) o `vence` "
-                    "(su último día cubierto cae entre `desde` y `hasta`). Para `comprobante`: `pendiente`, "
+                    "Para `membresia`: `vigente` (cubre hoy), `en_gracia` (venció el mes pasado y hoy es día 10 o "
+                    "antes: debe un mes), `vencida` (venció el mes pasado y ya pasó el día 10), `sin_membresia` "
+                    "(venció antes del mes pasado, o nunca tuvo) o `vence` (su último día cubierto cae entre "
+                    "`desde` y `hasta`). Para `comprobante`: `pendiente`, "
                     "`aprobado` o `rechazado`; con `desde` y `hasta` opcionales, que son la fecha en que se subió."
                 ),
             },
@@ -121,6 +123,157 @@ FILTERS_SCHEMA: dict[str, Any] = {
             "minimo": {"type": "integer", "description": "`entrenos`: mínimo de entrenos hechos. `faltas`: mínimo sin hacer (por defecto 1)."},
         },
         "required": ["tipo"],
+    },
+}
+
+DATA_SCHEMA: dict[str, Any] = {
+    "name": "datos",
+    "description": (
+        "Consulta general: tú eliges tabla, columnas, filtros, agrupación, sumas y fórmulas. Úsala para todo lo "
+        "que sea cobranza, tarifas, membresías, perfil, inscripciones, grupos, convenios o avisos, y siempre que "
+        "otra herramienta no traiga la columna que necesitas. Pide `columnas` para filas, o `medidas` (con "
+        "`agrupar` si quieres desglose) para totales; no las dos.\n"
+        "Tablas con las columnas de la persona: `atletas` (una fila por persona), `comprobantes` (una por "
+        "comprobante), `inscripciones` (una por inscripción a un evento) y `entregas` (una por entrega de un aviso "
+        "a una persona). Tablas que no son de personas, sin `estado` ni `personas`: `avisos`, `grupos` y "
+        "`convenios`.\n"
+        "Columnas de persona:\n"
+        "- `atleta`: la persona. Tú ves su código ATLETA_NN; el chat recibe el nombre.\n"
+        "- `email`, `telefono`, `contacto_emergencia`, `notas`, `comentario_coach`: variables. Tú ves `{email}`; "
+        "el valor sale en la tabla o el CSV del chat. Solo se listan: no se filtran, agrupan, ordenan ni calculan.\n"
+        "- `tarifa`: lo que paga al mes, en pesos.\n"
+        "- `usa_beneficio` (sí/no): entrena con beneficio y no paga (marcado, o con tarifa de 0 o 1). No es "
+        "ingreso esperado: exclúyelo al sumar tarifas.\n"
+        "- `membresia`: `vigente` (cubierta hoy), `en_gracia` (venció el mes pasado y hoy es día 10 o antes: debe "
+        "un mes), `vencida` (venció el mes pasado y ya pasó el día 10: no debe nada) o `sin_membresia` (venció "
+        "antes del mes pasado, o nunca tuvo). Nunca digas «cancelada».\n"
+        "- `pendiente`: lo que debe hoy: su tarifa si está `en_gracia` y no usa beneficio; si no, 0. Nadie debe "
+        "más de un mes. El monto pendiente de cobro es la suma de esta columna.\n"
+        "- `cubierto_hasta`, `ultimo_pago` (fechas), `meses_pagados`.\n"
+        "- `descuento_1_mes`, `descuento_3_meses`, `descuento_6_meses` (sí/no): qué planes puede comprar.\n"
+        "- `nivel`, `sede`, `genero`, `pais`, `estado` (donde vive), `alta` (fecha), `grupo`, `rol`, "
+        "`reloj_vinculado` (sí/no).\n"
+        "Solo de `comprobantes`: `monto` (vacío si nadie lo capturó), `precio_esperado`, `meses`, `situacion` "
+        "(aprobado, pendiente, rechazado), `es_beneficio` (sí/no: foto de un beneficio, no un pago), `fecha_pago`, "
+        "`subido`, `origen` (app, consola, historico), y las variables `referencia` y `motivo_rechazo`. Un ingreso "
+        "es `situacion` = aprobado y `es_beneficio` = false, por `fecha_pago`.\n"
+        "Solo de `inscripciones`: `evento`, `tipo_evento`, `ubicacion`, `fecha_evento`, `evento_principal` "
+        "(sí/no), `tiempo_objetivo`, `resultado_segundos`.\n"
+        "Solo de `avisos` (los enviados con entrega medida): `aviso` (su número), `fecha`, `canal` (email o push), "
+        "`categoria`, `con_destino` (personas a las que había a dónde mandarlo), `aceptadas`, `rechazadas`, "
+        "`fallidas`, y las variables `asunto` y `mensaje`.\n"
+        "Solo de `entregas`: `aviso`, `fecha`, `canal_entrega`, `resultado` (accepted, rejected, failed, skipped), "
+        "`detalle`, y la variable `asunto`. Sirve para saber a quién no le llegó un aviso.\n"
+        "`grupos`: `grupo`, `miembros`. `convenios`: `empresa`, `beneficio`, `codigo`, `descripcion`, `creado`.\n"
+        "Entrenos junto a lo demás: en una lista de `atletas` puedes pedir además `entrenos_prescritos`, "
+        "`entrenos_hechos`, `km` y `score`, con `entrenos: {desde, hasta}` (máximo 92 días y 60 personas: acota "
+        "con filtros). Se pueden listar y ordenar, no filtrar, sumar ni meter en fórmulas; el total de esas "
+        "personas te llega aparte. Vueltas, plan y detalle de un entreno siguen en sus herramientas.\n"
+        "Al sumar o promediar una columna que puede venir vacía o en cero (`monto`, `tarifa`), pide también las "
+        "medidas `vacios` y `ceros` de esa columna y dilo en la respuesta."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tabla": {
+                "type": "string",
+                "enum": ["atletas", "comprobantes", "inscripciones", "entregas", "avisos", "grupos", "convenios"],
+            },
+            "estado": {
+                "type": "string",
+                "enum": ["todos", "activos", "inactivos"],
+                "description": "De la persona. Por defecto `todos` (activos y pausados).",
+            },
+            "columnas": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Columnas o fórmulas a traer fila por fila.",
+            },
+            "filtros": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "columna": {"type": "string", "description": "Una columna o una fórmula."},
+                        "op": {
+                            "type": "string",
+                            "enum": ["=", "!=", "<", "<=", ">", ">=", "entre", "en", "contiene", "vacio", "no_vacio"],
+                        },
+                        "valor": {
+                            "description": (
+                                "Número, texto, true/false o fecha YYYY-MM-DD, según la columna. `entre` pide "
+                                "[desde, hasta]; `en`, una lista; `vacio` y `no_vacio` no llevan valor."
+                            )
+                        },
+                    },
+                    "required": ["columna", "op"],
+                },
+            },
+            "personas": {
+                **FILTERS_SCHEMA,
+                "description": (
+                    "Para acotar de quién son las filas con lo que estas columnas no dicen: evento, entrenos "
+                    "hechos o faltas. Los mismos filtros de `buscar_atletas`."
+                ),
+            },
+            "agrupar": {"type": "array", "items": {"type": "string"}, "description": "Solo con `medidas`."},
+            "medidas": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "fn": {
+                            "type": "string",
+                            "enum": ["cuenta", "cuenta_distintos", "suma", "promedio", "min", "max", "vacios", "ceros"],
+                            "description": "`cuenta` sin `de` cuenta filas. `vacios` y `ceros` cuentan las filas con esa columna vacía o en 0.",
+                        },
+                        "de": {"type": "string", "description": "Columna o fórmula."},
+                        "como": {"type": "string", "description": "Nombre del resultado, en minúsculas y sin espacios."},
+                    },
+                    "required": ["fn"],
+                },
+            },
+            "formulas": {
+                "type": "object",
+                "additionalProperties": {"type": "string"},
+                "description": (
+                    "Nombre → expresión con + - * /, coalesce(a, b), columnas numéricas y números. Por ejemplo "
+                    '{"faltante": "precio_esperado - coalesce(monto, 0)"}. Una fórmula se usa como cualquier '
+                    "columna: en `columnas`, `filtros`, `medidas` y `orden`."
+                ),
+            },
+            "orden": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Columnas o resultados; con `-` delante, de mayor a menor.",
+            },
+            "limite": {"type": "integer", "minimum": 1, "maximum": 500},
+            "entrenos": {
+                "type": "object",
+                "properties": {
+                    "desde": {"type": "string", "description": "YYYY-MM-DD."},
+                    "hasta": {"type": "string", "description": "YYYY-MM-DD."},
+                },
+                "required": ["desde", "hasta"],
+                "description": "Periodo de las columnas de entrenos de `atletas`.",
+            },
+            "salida": {
+                "type": "string",
+                "enum": ["chat", "modelo"],
+                "description": (
+                    "`chat`: las filas salen al chat como tabla o CSV, con nombres y variables reales. `modelo`: "
+                    "solo tú las ves, para razonar o armar tu propia `tabla`. Por defecto `chat` con `columnas` y "
+                    "`modelo` con `medidas`."
+                ),
+            },
+            "titulo": {"type": "string", "description": "Título de la tabla que sale al chat."},
+            "formato": {
+                "type": "string",
+                "enum": ["auto", "imagen", "csv"],
+                "description": "Igual que en `entrenos_atleta`: `imagen` o `csv` solo si el administrador lo pidió.",
+            },
+        },
+        "required": ["tabla"],
     },
 }
 
@@ -587,6 +740,7 @@ SCHEMAS: list[dict[str, Any]] = [
             },
         },
     },
+    DATA_SCHEMA,
 ]
 
 WHO = {
@@ -884,7 +1038,7 @@ def _filter(raw: Any) -> dict[str, Any]:
     if kind == "membresia":
         status = raw.get("situacion")
         if status not in MEMBERSHIP_STATUSES:
-            raise ValueError("a `membresia` filter needs `situacion`: vigente, vencida, sin_membresia or vence")
+            raise ValueError("a `membresia` filter needs `situacion`: vigente, en_gracia, vencida, sin_membresia or vence")
         out = {"type": "membership", "status": MEMBERSHIP_STATUSES[status]}
         return {**out, **_window(raw)} if status == "vence" else out
     if kind == "comprobante":
@@ -921,7 +1075,9 @@ def _filter(raw: Any) -> dict[str, Any]:
     raise ValueError("`tipo` must be evento, pago, grupo, entrenos, membresia, comprobante, perfil or faltas")
 
 
-MEMBERSHIP_STATUSES = {"vigente": "current", "vencida": "expired", "sin_membresia": "none", "vence": "expires"}
+MEMBERSHIP_STATUSES = {
+    "vigente": "current", "en_gracia": "grace", "vencida": "expired", "sin_membresia": "none", "vence": "expires",
+}
 RECEIPT_STATUSES = {"pendiente": "pending", "aprobado": "approved", "rechazado": "rejected"}
 GENDERS = {"femenino": "female", "masculino": "male"}
 
@@ -1382,6 +1538,81 @@ def _profile_facts(data: dict[str, Any]) -> list[str]:
     return facts
 
 
+DATA_TABLES = ("atletas", "comprobantes", "inscripciones", "entregas", "avisos", "grupos", "convenios")
+DATA_OPS = {"entre": "between", "en": "in", "contiene": "contains", "vacio": "empty", "no_vacio": "not_empty"}
+DATA_FNS = {
+    "cuenta": "count", "cuenta_distintos": "count_distinct", "suma": "sum", "promedio": "avg",
+    "min": "min", "max": "max", "vacios": "empty", "ceros": "zero",
+}
+DATA_OUTPUTS = ("chat", "modelo")
+# Rows the model reads of a list. The chat gets them all.
+DATA_MODEL_ROWS = 60
+DATA_WIDTHS = {"person": 3.2, "text": 2.2, "date": 1.7, "number": 1.9, "bool": 1.3}
+
+
+def _names_list(args: dict[str, Any], key: str) -> list[str]:
+    value = args.get(key) or []
+    if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+        raise ValueError(f"`{key}` must be a list of names")
+    return value
+
+
+def _data_body(args: dict[str, Any]) -> dict[str, Any]:
+    """The model's `datos` call as `/assistant/data` spells it. The API checks names and values."""
+    if args.get("tabla") not in DATA_TABLES:
+        raise ValueError("`tabla` must be one of " + ", ".join(DATA_TABLES))
+    filters = args.get("filtros") or []
+    if not isinstance(filters, list) or any(not isinstance(f, dict) for f in filters):
+        raise ValueError("`filtros` must be a list of {columna, op, valor}")
+    measures = args.get("medidas") or []
+    if not isinstance(measures, list) or any(not isinstance(m, dict) or m.get("fn") not in DATA_FNS for m in measures):
+        raise ValueError("`medidas` must be a list of {fn, de, como}, with `fn` one of " + ", ".join(DATA_FNS))
+    formulas = args.get("formulas") or {}
+    if not isinstance(formulas, dict):
+        raise ValueError("`formulas` must be an object of name → expression")
+    body: dict[str, Any] = {
+        "table": args["tabla"],
+        "member_status": _member_status(args),
+        "columns": _names_list(args, "columnas"),
+        "filters": [
+            {"column": f.get("columna"), "op": DATA_OPS.get(f.get("op"), f.get("op")), "value": f.get("valor")}
+            for f in filters
+        ],
+        "people": _filters({"filtros": args.get("personas")}),
+        "group_by": _names_list(args, "agrupar"),
+        "measures": [
+            {"fn": DATA_FNS[m["fn"]], **({"of": m["de"]} if m.get("de") else {}), **({"as": m["como"]} if m.get("como") else {})}
+            for m in measures
+        ],
+        "formulas": formulas,
+        "order": _names_list(args, "orden"),
+    }
+    if args.get("limite") is not None:
+        body["limit"] = _integer(args, "limite", 1, QUERY_LIMIT)
+    if args.get("entrenos") is not None:
+        if not isinstance(args["entrenos"], dict):
+            raise ValueError("`entrenos` must be {desde, hasta}")
+        start, end = _iso_date(args["entrenos"], "desde"), _iso_date(args["entrenos"], "hasta")
+        if not start or not end:
+            raise ValueError("`entrenos` needs `desde` and `hasta`")
+        body["workouts"] = {"from": start, "to": end}
+    return body
+
+
+def _data_cell(value: Any, blank: str = charts.EMPTY_CELL) -> str:
+    if value is None or value == "":
+        return blank
+    if isinstance(value, bool):
+        return "sí" if value else "no"
+    if isinstance(value, (int, float)):
+        return f"{value:,.0f}" if float(value).is_integer() else f"{value:,.2f}"
+    return str(value)
+
+
+def _data_header(name: str) -> str:
+    return name.replace("_", " ").capitalize()
+
+
 def _format(args: dict[str, Any]) -> str:
     chosen = args.get("formato") or "auto"
     if chosen not in FORMATS:
@@ -1490,6 +1721,7 @@ class Toolbox:
             "resumen_atleta": self._summary,
             "buscar_atletas": self._query,
             "cifras": self._aggregate,
+            "datos": lambda a, u: self._data(a, u, names),
             "catalogo": self._catalog,
             "anotar_faltante": self._missing,
             "tabla": lambda a, u: self._draw(a, names),
@@ -1541,14 +1773,17 @@ class Toolbox:
             params={"q": text, "member_status": member_status},
         )
 
-    async def _filtered(self, path: str, telegram_user_id: int, body: dict[str, Any]) -> dict[str, Any]:
-        """A query by filters. Stopped when a name fits more races or groups than were asked for: nothing leaves on a guess."""
+    async def _filtered(self, path: str, telegram_user_id: int, body: dict[str, Any], key: str = "filters") -> dict[str, Any]:
+        """A query by filters. Stopped when a name fits more races or groups than were asked for: nothing leaves on a guess.
+
+        `key` is where the body carries the filters about people.
+        """
         found = await self._api.post(path, telegram_user_id=telegram_user_id, json=body)
-        asked = sum(1 for f in body.get("filters") or [] if f.get("type") == "event")
+        asked = sum(1 for f in body.get(key) or [] if f.get("type") == "event")
         events = (found.get("matched") or {}).get("events") or []
         if asked and len(events) > asked:
             raise AmbiguousEvent(events)
-        named = sum(1 + len(f.get("also") or []) for f in body.get("filters") or [] if f.get("type") == "group")
+        named = sum(1 + len(f.get("also") or []) for f in body.get(key) or [] if f.get("type") == "group")
         groups = list(dict.fromkeys((found.get("matched") or {}).get("groups") or []))
         if named and len(groups) > named:
             raise AmbiguousGroup(groups)
@@ -1789,6 +2024,71 @@ class Toolbox:
         groups = "; ".join(f"{g['name']} ({g['members']})" for g in found["groups"]) or "ninguno"
         events = "; ".join(f"{e['name']} ({e['date']})" for e in found["events"]) or "ninguno"
         return ToolResult(None, f"Grupos (miembros): {groups}.\nEventos (fecha): {events}.")
+
+    async def _data(self, args: dict[str, Any], telegram_user_id: int, names: Pseudonyms) -> ToolResult:
+        body = _data_body(args)
+        output = args.get("salida") or ("modelo" if body["measures"] else "chat")
+        if output not in DATA_OUTPUTS:
+            raise ValueError("`salida` must be chat or modelo")
+        layout = _format(args)
+        found = await self._filtered("/assistant/data", telegram_user_id, body, key="people")
+        columns, rows = found["columns"], found["rows"]
+        if not rows:
+            return ToolResult(None, "Ninguna fila con esos filtros." + _understood(found))
+
+        def for_model(column: dict[str, Any], value: Any) -> str:
+            if column["kind"] == "person":
+                return names.code(value["id"], value["name"]) if value else charts.EMPTY_CELL
+            if column["kind"] == "variable":
+                return "{" + column["name"] + "}"
+            return _data_cell(value)
+
+        def for_chat(column: dict[str, Any], value: Any, blank: str = charts.EMPTY_CELL) -> Any:
+            if column["kind"] == "person":
+                return value["name"] if value else blank
+            if column["name"] == "membresia" and isinstance(value, str):
+                return value.replace("_", " ")
+            return _data_cell(value, blank)
+
+        shown = rows[:DATA_MODEL_ROWS]
+        lines = [" | ".join(c["name"] for c in columns)]
+        lines += [" | ".join(for_model(c, row[c["name"]]) for c in columns) for row in shown]
+        more = " Hay más: acota o sube `limite`." if found.get("truncated") else ""
+        left = f" Tú ves las primeras {len(shown)}." if len(rows) > len(shown) else ""
+        to_model = f"{len(rows)} fila(s), al {found['today']}.{more}{left}\n" + "\n".join(lines)
+        totals = found.get("workout_totals")
+        if totals:
+            to_model += (
+                f"\nEntrenos de esas {totals['athletes']} persona(s), del {totals['period']['from']} al "
+                f"{totals['period']['to']}: {totals['entrenos_hechos']} hechos de {totals['entrenos_prescritos']} "
+                f"prescritos, {_data_cell(totals['km'])} km, score {_data_cell(totals['score'])}."
+            )
+        to_model += _understood(found)
+        if output == "modelo":
+            return ToolResult(None, to_model)
+
+        title = _clip(args["titulo"], 60) if isinstance(args.get("titulo"), str) and args["titulo"].strip() else _data_header(body["table"])
+        return await self._deliver(
+            layout,
+            body["table"],
+            "Datos",
+            title,
+            f"{len(rows)} fila(s)  ·  al {found['today']}" + ("  ·  hay más" if found.get("truncated") else ""),
+            [
+                (_data_header(c["name"]), DATA_WIDTHS[c["kind"] if c["kind"] == "person" else c["type"]], "right" if c["type"] == "number" and c["kind"] == "open" else "left")
+                for c in columns
+            ],
+            [[for_chat(c, row[c["name"]]) for c in columns] for row in rows],
+            [_data_header(c["name"]) for c in columns],
+            [
+                [
+                    for_chat(c, row[c["name"]], "") if c["kind"] != "open" or c["type"] != "number" else ("" if row[c["name"]] is None else row[c["name"]])
+                    for c in columns
+                ]
+                for row in rows
+            ],
+            to_model,
+        )
 
     async def _aggregate(self, args: dict[str, Any], telegram_user_id: int) -> ToolResult:
         wanted = args.get("metricas")

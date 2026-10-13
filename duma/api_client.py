@@ -32,6 +32,7 @@ ALLOWED = (
     ("POST", re.compile(r"^/assistant/athletes/query$")),
     ("POST", re.compile(r"^/assistant/athletes/aggregate$")),
     ("POST", re.compile(r"^/assistant/athletes/series$")),
+    ("POST", re.compile(r"^/assistant/data$")),
     ("POST", re.compile(r"^/assistant/messages/preview$")),
 )
 # A member's bank document: fetched to show it to the admin, never handed to the model.
